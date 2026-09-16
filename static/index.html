@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>115 网盘管理器</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💾</text></svg>">
+<link rel="stylesheet" href="style.css?v=20260906c">
+</head>
+<body>
+<header>
+  <h1>📁 115 网盘管理器</h1>
+  <div id="health" data-action="cookie-open" style="padding:5px 12px;border:1px solid var(--line);border-radius:7px;background:var(--card);cursor:pointer;font-size:12px" title="点击管理 Cookie">🍪 Cookie 检查中…</div>
+  <div style="flex:1"></div>
+  <div class="sub" id="dbStats"></div>
+  <button data-action="log-open" style="margin-left:14px;padding:5px 12px;font-size:12px" title="实时日志：扫描/转存/AI/文件操作/系统事件">📜 日志<span id="logDot" style="display:none"></span></button>
+  <button data-action="open-backup" style="margin-left:8px;padding:5px 12px;font-size:12px" title="数据库备份管理">💾 备份</button>
+</header>
+<div class="tabs">
+  <div class="tab" data-action="tab" data-tab="dash">仪表盘</div>
+  <div class="tab on" data-action="tab" data-tab="tree">目录浏览</div>
+  <div class="tab" data-action="tab" data-tab="search">搜索</div>
+  <div class="tab" data-action="tab" data-tab="scan">扫描管理</div>
+  <div class="tab" data-action="tab" data-tab="transfer">自动转存</div>
+  <div class="tab" data-action="tab" data-tab="dup">结果与查重</div>
+  <div class="tab" data-action="tab" data-tab="ai">AI 分类</div>
+  <div class="tab" data-action="tab" data-tab="tags">标签</div>
+</div>
+
+<!-- 仪表盘 -->
+<div class="panel" id="p-dash">
+  <div class="sub" id="dashMeta" style="margin-bottom:10px"></div>
+  <div class="stat-grid" id="dashStats"></div>
+  <div style="display:flex;gap:14px;align-items:stretch;margin-top:14px;flex-wrap:wrap">
+    <div class="card" style="flex:2;min-width:340px;margin-bottom:0">
+      <h3>📈 库存趋势（每日快照）</h3>
+      <div id="dashTrend"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:260px;margin-bottom:0">
+      <h3>💾 文件大小分布</h3>
+      <div id="dashBuckets"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap">
+    <div class="card" style="flex:1;min-width:340px">
+      <h3>🗂 最大一级目录 Top 10</h3>
+      <div id="dashRoots"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:340px">
+      <h3>📄 最大文件 Top 10</h3>
+      <div id="dashFiles"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap">
+    <div class="card" style="flex:1;min-width:260px">
+      <h3>🔁 重复概况</h3>
+      <div id="dashDup"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:260px">
+      <h3>⬇️ 转存历史</h3>
+      <div id="dashTransfer"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:260px">
+      <h3>🔍 最近扫描</h3>
+      <div id="dashJobs"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 目录浏览 -->
+<div class="panel on" id="p-tree">
+  <div class="card">
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="lg-chip on" data-action="tree-mode" data-tree-mode="local">💾 本地数据</button>
+      <button class="lg-chip" data-action="tree-mode" data-tree-mode="live">🌐 在线浏览</button>
+      <span style="flex:1"></span>
+      <select id="treeSort" style="min-width:120px" title="排序方式">
+        <option value="time_desc">⏰ 时间(最新)</option>
+        <option value="time_asc">⏰ 时间(最早)</option>
+        <option value="name_asc">🔤 名称 A→Z</option>
+        <option value="name_desc">🔤 名称 Z→A</option>
+      </select>
+    </div>
+    <div class="sub" style="margin-top:6px">点击目录展开浏览；未扫描目录带 <span class="badge b-warn">未扫</span> 标，点 <span class="badge b-pri">扫</span> 可发起扫描。在线模式读取网盘实时目录，<b>双击「在线浏览」可强制刷新缓存</b>。</div>
+  </div>
+  <div id="treeWrap">
+    <div class="card" id="treeBox" style="min-height:300px"></div>
+    <div class="card" id="detail" style="display:none"></div>
+  </div>
+</div>
+
+<!-- 搜索 -->
+<div class="panel" id="p-search">
+  <div class="card">
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input id="searchQ" placeholder="输入目录或文件名（≥2字），回车搜索…" style="flex:1;min-width:240px;font-size:15px;padding:8px 12px">
+      <select id="searchType" style="min-width:90px">
+        <option value="all">全部</option>
+        <option value="dir">仅目录</option>
+        <option value="file">仅文件</option>
+      </select>
+      <select id="searchRoot" style="min-width:200px;max-width:280px"><option value="">全部根目录</option></select>
+      <input id="searchMinMB" placeholder="≥ MB" type="number" style="width:80px" title="最小大小（仅文件）">
+      <input id="searchMaxMB" placeholder="≤ MB" type="number" style="width:80px" title="最大大小（仅文件）">
+      <button data-action="search-go" class="pri" style="padding:6px 18px">搜索</button>
+    </div>
+    <!-- 最近搜索：JS 控制显隐，默认隐藏防止加载前闪烁 -->
+    <div class="row" id="histBar" style="gap:10px;margin-top:10px;align-items:flex-start;display:none">
+      <b style="font-size:13px;line-height:26px;white-space:nowrap;flex:none">🕘 最近搜索</b>
+      <div id="searchHistory" style="display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0"></div>
+      <a class="sub" style="cursor:pointer;font-size:12px;line-height:26px;white-space:nowrap;flex:none" data-action="hist-clear">清空</a>
+    </div>
+    <div class="sub" style="margin-top:6px;font-size:11.5px">提示：点击上方关键词可重新搜索；筛选器可叠加，按文件大小排序；搜索词会写入地址栏，刷新/分享可复现</div>
+  </div>
+  <div class="card">
+    <div class="sub" id="searchSummary" style="margin-bottom:8px">输入关键字开始搜索</div>
+    <div id="searchResults"><div class="empty">暂无结果</div></div>
+  </div>
+</div>
+
+<!-- 扫描管理 -->
+<div class="panel" id="p-scan">
+  <div class="card">
+    <h3>发起扫描</h3>
+    <div class="row">
+      <select id="scanRootSel" style="min-width:280px"><option>加载中…</option></select>
+      <label class="sub"><input type="checkbox" id="scanRescan"> 强制重扫（清旧记录）</label>
+      <button class="pri" data-action="scan-start">开始扫描</button>
+    </div>
+    <div class="sub" style="margin-top:6px">串行限速 3~5 秒/请求，自动断点续扫；同一目录运行中不会重复提交。失败后自动进入「等待重试」：每 5 分钟探测一次网络，通过即自动续扫（最多 3 轮）；失败/停止的任务可点行尾「继续」。</div>
+  </div>
+  <div class="card">
+    <h3>任务列表 <span class="sub" id="scanHint"></span></h3>
+    <div id="scanJobs"></div>
+  </div>
+  <div class="card">
+    <h3>定时扫描</h3>
+    <div class="row" style="margin-bottom:10px">
+      <select id="schRootSel" style="min-width:280px"><option>加载中…</option></select>
+      <input type="time" id="schTime" value="03:00">
+      <button class="pri" data-action="sched-add">添加定时</button>
+    </div>
+    <div id="schedList"></div>
+  </div>
+</div>
+
+<!-- 自动转存 -->
+<div class="panel" id="p-transfer">
+  <div class="card">
+    <h3>① 导入分享链接</h3>
+    <div class="row" style="margin-bottom:8px">
+      <input type="file" id="tfFile" accept=".txt,.csv,.xlsx">
+      <span class="sub">支持 txt / csv / xlsx（自动提取分享码+访问码+去重）</span>
+    </div>
+    <textarea id="tfText" rows="4" style="width:100%" placeholder="或直接粘贴 115 分享链接（每行一条，可带标题：标题 链接 密码）&#10;例：庆余年 https://115.com/s/abc123xyz?password=8888"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="pri" data-action="parse-text">解析链接</button>
+      <span class="sub" id="parseInfo"></span>
+    </div>
+  </div>
+  <div class="card" id="parseCard" style="display:none">
+    <h3>② 确认清单 <span class="sub" id="parseCount"></span></h3>
+    <div style="max-height:260px;overflow:auto"><table id="parseTable"><thead>
+      <tr><th>标题</th><th>分享码</th><th>访问码</th><th></th></tr>
+    </thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>③ 转存目标</h3>
+    <div class="row">
+      <input type="hidden" id="tfTargetCid" value="">
+      <button id="tfTargetBtn" data-action="tf-target-pick" style="min-width:280px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        📂 点击选择目标目录
+      </button>
+      <input id="tfNewDir" placeholder="或新建目录名（在选定目录下）" style="width:220px">
+      <input id="tfName" placeholder="任务名（可留空）" style="width:160px">
+      <button class="pri" data-action="transfer-go" disabled>开始转存</button>
+    </div>
+    <div class="sub" style="margin-top:6px">每条间隔 4~6 秒防风控；重复/失效自动分类记录。</div>
+  </div>
+  <div class="card">
+    <h3>转存任务</h3>
+    <div id="tfTasks"></div>
+  </div>
+</div>
+
+<!-- 结果与查重 -->
+<div class="panel" id="p-dup">
+  <div class="stat-grid" id="statGrid" style="margin-bottom:14px"></div>
+  <div class="card">
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="sub">范围</span>
+      <select id="dupScope" style="min-width:220px;max-width:320px"><option value="">全部一级目录（默认）</option></select>
+      <span class="sub">过滤</span>
+      <input id="dupFilter" placeholder="按组名/目录名筛选…" style="flex:1;min-width:140px;max-width:240px">
+      <span class="sub">排序</span>
+      <select id="dupSort" style="min-width:140px">
+        <option value="count">重复数从多到少</option>
+        <option value="exact">精确重复优先</option>
+        <option value="name">按组名 A-Z</option>
+      </select>
+      <button id="dupRefresh" data-action="dup-refresh" class="pri" style="padding:4px 14px">刷新</button>
+      <label class="sub" style="display:flex;align-items:center;gap:4px;margin:0">
+        <input type="checkbox" id="dupAuto"> 自动刷新(30s)
+      </label>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <h3 style="margin:0">疑似重复目录 <span class="sub" id="dupSummary"></span></h3>
+      <span style="flex:1"></span>
+      <span class="sub">每组保留</span>
+      <select id="dupKeepN" style="padding:4px 8px">
+        <option value="1" selected>1 个（删多余副本）</option>
+        <option value="2">2 个</option>
+      </select>
+      <button data-action="dup-sel-exact" style="padding:4px 12px;font-size:12.5px;background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger);border-radius:6px;cursor:pointer">一键勾选精确重复</button>
+      <button data-action="dup-del-exact" style="padding:4px 12px;font-size:12.5px;background:var(--danger);color:#fff;border:1px solid var(--danger);border-radius:6px;cursor:pointer">一键删除全部精确重复</button>
+    </div>
+    <div id="dupList"><div class="empty">加载中…</div></div>
+  </div>
+</div>
+
+<!-- AI 分类 -->
+<div class="panel" id="p-ai">
+  <div class="card">
+    <h3>⚙️ AI 接口配置 <span class="sub" id="aiCfgState"></span></h3>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input id="aiBase" placeholder="API Base URL（如 https://api.deepseek.com/v1）" style="flex:2;min-width:260px">
+      <input id="aiModel" placeholder="模型名（如 deepseek-chat）" style="flex:1;min-width:150px">
+      <input id="aiKey" type="password" placeholder="API Key（留空=不修改）" style="flex:1;min-width:170px">
+    </div>
+    <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="aiTmdbKey" type="password" placeholder="TMDB API Key（留空=不修改）" style="flex:1;min-width:260px">
+      <span class="sub">可选，用于自动查询影视元数据辅助 AI 分类。<a href="https://www.themoviedb.org/settings/api" target="_blank">获取 Key →</a></span>
+    </div>
+    <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap">
+      <button class="pri" data-action="ai-save-config">保存配置</button>
+      <button data-action="ai-test">测试连接</button>
+      <button data-action="ai-prompt-toggle">📝 提示词</button>
+      <button data-action="ai-adv-toggle">⚙️ 高级配置</button>
+      <span class="sub" id="aiTestOut"></span>
+    </div>
+    <div class="sub" style="margin-top:6px">配置保存在项目根 ai_config.json（含 Key，请勿随备份外发）；兼容 DeepSeek / Kimi / OpenAI 等标准接口。</div>
+    <div id="aiPromptWrap" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px;background:#fbfbfc">
+      <div style="font-weight:600;margin-bottom:6px">📝 系统提示词</div>
+      <textarea id="aiPrompt" rows="18" style="width:100%;font-family:monospace;font-size:12.5px;line-height:1.6;resize:vertical;tab-size:2" placeholder="系统提示词（含占位符 {{tax_line}} {{res_line}} 等，分析时自动替换为标签库值）"></textarea>
+      <div class="sub" style="margin-top:4px">可用占位符：{{tax_line}} {{res_line}} {{sub_line}} {{country_line}} {{quality_line}} {{audio_line}}，分析时自动替换为标签库中的值。留空恢复默认。</div>
+    </div>
+    <div id="aiAdvWrap" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px;background:#fbfbfc">
+      <div style="font-weight:600;margin-bottom:6px">⚙️ 高级配置</div>
+      <div class="row" style="gap:8px;align-items:center">
+        <span class="sub">每块条数</span>
+        <input id="aiBatchSize" type="number" min="1" max="100" style="width:80px" title="每次 API 调用发送的条目数（默认10，改了无需重启）">
+        <span class="sub">条/次 API 调用。小块更安全（防超时/风控），大块更省 token。</span>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>🔍 发起分析</h3>
+    <div class="row">
+      <span id="aiScopeDisplay" class="ai-scope-display" data-action="ai-scope-pick" style="min-width:280px">点击选择分析范围…</span>
+      <input type="hidden" id="aiScopeCid" value="">
+      <input id="aiLimit" type="number" placeholder="试跑条数(空=全量)" style="width:150px" title="建议先试跑 20 条核对准确率">
+      <button class="pri" data-action="ai-analyze">开始分析</button>
+      <button data-action="ai-refresh-batches">刷新任务</button>
+    </div>
+    <div class="sub" style="margin-top:6px">规则可定案的条目零成本直出（原盘/演唱会特征）；其余按批调 AI（60 条/次，间隔 1~2 秒）；建议先试跑 20 条核对准确率再全量。</div>
+    <div id="aiBatches" style="margin-top:10px"></div>
+  </div>
+  <div class="card">
+    <h3>📋 分类建议审核 <span class="sub" id="aiSum"></span></h3>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="sub">状态</span>
+      <select id="aiStatus" style="min-width:110px">
+        <option value="pending">待审核</option>
+        <option value="approved">已通过</option>
+        <option value="rejected">已驳回</option>
+        <option value="moved">已移动</option>
+        <option value="all">全部</option>
+      </select>
+      <span class="sub">分类</span>
+      <select id="aiCat" style="min-width:130px"><option value="">全部分类</option></select>
+      <span class="sub">置信度≥</span>
+      <select id="aiConf" style="min-width:90px">
+        <option value="0">不限</option><option value="0.5">0.5</option>
+        <option value="0.7">0.7</option><option value="0.85">0.85</option>
+      </select>
+      <button class="pri" data-action="ai-load-sug" style="padding:4px 14px">加载</button>
+      <button data-action="ai-sel-all-page" style="padding:4px 14px">全选本页</button>
+      <button data-action="ai-sel-none" style="padding:4px 14px">取消全选</button>
+    </div>
+    <div id="aiList"><div class="empty">加载中…</div></div>
+    <div id="aiSelList" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;max-height:240px;overflow:auto;background:#fbfbfc"></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+      <span class="sub" id="aiSelInfo" data-action="ai-sel-toggle" style="cursor:pointer" title="点击展开/收起勾选清单">未勾选</span>
+      <span style="flex:1"></span>
+      <button class="pri" data-action="ai-approve-sel">通过勾选</button>
+      <button class="danger" data-action="ai-reject-sel">驳回勾选</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>✅ 已通过队列 <span class="sub" id="aiAppSum"></span></h3>
+    <div class="sub" style="margin-bottom:8px">这里是全部「已通过」的建议——「生成移动计划」整批移走的就是它们；单条可移回待审核或驳回。通过的瞬间会自动给资源落上 类型+载体 标签（标签页可查可筛，移动后标签自动跟随）。</div>
+    <div id="aiApprovedList"><div class="empty">加载中…</div></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+      <button data-action="ai-plan" style="background:var(--warn);color:#fff;border-color:var(--warn)">📦 生成移动计划（全部已通过）…</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>📋 移动历史 <span class="sub" id="aiMoveSum"></span></h3>
+    <div class="sub" style="margin-bottom:8px">每次移动操作的明细记录——什么时候、哪些文件、从哪移到哪。</div>
+    <div id="aiMoveHistory"><div class="empty">暂无记录</div></div>
+  </div>
+  <div class="card">
+    <h3>🧹 数据清理</h3>
+    <div class="sub" style="margin-bottom:8px">清除残留的 AI 建议数据，释放条目以便重新分析。清除后可对同一范围重新发起 AI 分类。</div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <button data-action="ai-clear-rejected" title="清除已驳回的建议，允许重新分析">清除已驳回</button>
+      <button data-action="ai-clear-moved" title="清除已移动的建议（移动记录保留）">清除已移动</button>
+      <button data-action="ai-clear-move-history" title="清除所有移动历史记录">清除移动历史</button>
+      <button data-action="ai-clear-all" title="清除全部建议，从零开始" style="color:var(--danger)">清除全部</button>
+    </div>
+  </div>
+</div>
+
+<!-- 标签 -->
+<div class="panel" id="p-tags">
+  <div class="card">
+    <h3>🏷️ 标签库 <span class="sub" id="tagSum"></span></h3>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input id="tagNewName" placeholder="新标签名（≤30字）" style="width:170px">
+      <select id="tagNewCat" style="width:96px"></select>
+      <input id="tagNewColor" type="color" value="#0052d9" title="标签颜色" style="width:42px;height:32px;padding:2px">
+      <button class="pri" data-action="tag-create">新建标签</button>
+      <span style="flex:1"></span>
+      <button data-action="tag-cleanup" title="清理指向已删除节点的标签关联">清理失效关联</button>
+      <button class="danger" data-action="tag-clear-all" title="清空全部标签关联（标签定义保留，之后可重新打标）">🗑 一键清零</button>
+      <button data-action="tag-rules-dry" title="只统计命中数量，不写库">▶ 规则试跑</button>
+      <button class="pri" data-action="tag-rules-run">规则打标…</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <label class="sub" style="display:flex;align-items:center;gap:4px;margin:0">
+        <input type="checkbox" id="tagRulesClean"> 打标前先清掉上次规则结果（改了规则就勾上，手动打的标不受影响）
+      </label>
+    </div>
+    <div class="sub" style="margin-top:6px">规则引擎按名字正则打标（4K/原盘/国语/中字…），处理已入库目录和单体文件；剧集逐集文件、图片/海报/nfo 等非媒体文件自动跳过；目录内含 BDMV/VIDEO_TS 标准碟片结构的自动识别为原盘；结果带 source='rule' 标记，可随时整体重打。</div>
+    <div id="tagRulesOut" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px;background:#fbfbfc;white-space:pre-wrap;font-size:12.5px;line-height:1.7"></div>
+    <div class="row" style="margin-top:10px">
+      <button data-action="tag-rules-mgr">⚙ 规则管理…</button>
+      <span class="sub">在这里查看/编辑/停用/新增规则；改完先「规则试跑」预览命中，再勾上方「先清理」重新打标。</span>
+    </div>
+    <div id="tagRulesMgr" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px;background:#fbfbfc">
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin:0">
+        <span class="sub" style="flex:none">文件级打标排除扩展名：</span>
+        <input id="tagRulesDeny" style="flex:1;min-width:280px" placeholder="空格分隔，如: jpg png nfo …">
+        <button data-action="tag-deny-save">保存</button>
+      </div>
+      <div class="sub" style="margin-top:4px">这些后缀的单体文件不参与规则打标（海报/剧照/nfo/文档等，它们的文件名常继承资源全名，打上属性标签是噪音）；目录不受影响；字幕 srt/ass 默认保留。改动后要「先清理」重新打标才生效。</div>
+      <div id="tagRulesList" style="margin-top:10px"></div>
+      <div class="row" style="margin-top:8px;margin-bottom:0">
+        <button data-action="tag-rule-add">＋ 新增规则</button>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>按标签浏览 <span class="sub">点标签查看清单，勾选后可批量移动/删除/再打标</span></h3>
+    <div id="tagCloud"><div class="empty">加载中…</div></div>
+  </div>
+  <div class="card" id="tagNodesCard" style="display:none">
+    <h3><span id="tagNodesTitle">标签清单</span> <span class="sub" id="tagNodesSum"></span></h3>
+    <div class="row" style="margin-bottom:8px">
+      <button data-action="tag-sel-all">全选本页</button>
+      <button data-action="tag-sel-none">取消全选</button>
+      <span style="flex:1"></span>
+      <button class="pri" data-action="move-open" title="使用底部已选清单里的目标目录">移动勾选到…</button>
+    </div>
+    <div id="tagNodes"></div>
+  </div>
+</div>
+
+<!-- 批量操作浮条 -->
+<div id="batchBar">
+  <button class="bb-info" data-action="bb-toggle" id="bbInfo" title="查看已勾选清单">已选 0 项</button>
+  <button class="pri" data-action="move-open">移动到…</button>
+  <button style="background:#7a5af8;color:#fff" data-action="bb-tag">🏷 打标签</button>
+  <button style="background:#e5484d;color:#fff" data-action="bb-del">删除</button>
+  <button class="bb-cancel" data-action="bb-clear">取消</button>
+</div>
+<div id="bbPop"></div>
+
+<!-- 批量移动弹窗 -->
+<div class="modal-bg" id="moveDlg" style="display:none">
+  <div class="modal" style="max-width:560px">
+    <h3><span>批量移动 — 选择目标目录</span><span class="close" data-action="move-close">×</span></h3>
+    <div class="row" style="margin-bottom:8px;gap:6px">
+      <input id="moveSearch" placeholder="过滤已加载目录名…" style="flex:1;min-width:180px">
+      <button data-action="move-search-more">搜本地库</button>
+    </div>
+    <div id="moveSearchOut"></div>
+    <div class="sub">在下方目录树中点选目标目录（点名称选中，点 ▶ 展开）</div>
+    <div id="moveTree" style="max-height:400px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px"></div>
+    <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="sub">目标：</span><b id="moveTargetName" style="color:var(--accent)">未选择</b>
+      <span style="flex:1"></span>
+      <button class="pri" data-action="move-do">移动选中项</button>
+    </div>
+  </div>
+</div>
+
+<!-- 打标签弹窗 -->
+<div class="modal-bg" id="tagDlg" style="display:none">
+  <div class="modal" style="max-width:430px">
+    <h3><span id="tagDlgTitle">打标签</span><span class="close" data-action="tagdlg-close">×</span></h3>
+    <div class="sub" style="margin-bottom:8px">勾选 = 打上；取消勾选 = 摘掉（只对当前已勾选项生效）</div>
+    <div id="tagDlgList" style="max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px"></div>
+    <div class="row" style="margin-top:10px;gap:6px">
+      <input id="tagDlgNew" placeholder="新建标签并直接应用" style="flex:1;min-width:150px">
+      <select id="tagDlgNewCat" style="width:96px;flex:none"></select>
+      <button data-action="tagdlg-new">新建</button>
+    </div>
+    <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px">
+      <button data-action="tagdlg-close">取消</button>
+      <button class="pri" data-action="tagdlg-apply">应用</button>
+    </div>
+  </div>
+</div>
+
+<!-- 实时日志弹窗 -->
+<div class="modal-bg" id="logPanel" style="display:none">
+  <div class="modal log-modal">
+    <h3><span>📜 实时日志</span><span class="close" data-action="log-close" title="关闭 (Esc)">×</span></h3>
+    <div class="log-toolbar">
+      <span class="lg-filters">
+        <button class="lg-chip on" data-action="log-filter" data-src="">全部</button>
+        <button class="lg-chip" data-action="log-filter" data-src="扫描">扫描</button>
+        <button class="lg-chip" data-action="log-filter" data-src="转存">转存</button>
+        <button class="lg-chip" data-action="log-filter" data-src="AI">AI</button>
+        <button class="lg-chip" data-action="log-filter" data-src="标签">标签</button>
+        <button class="lg-chip" data-action="log-filter" data-src="文件">文件</button>
+        <button class="lg-chip" data-action="log-filter" data-src="系统">系统</button>
+      </span>
+      <span style="flex:1"></span>
+      <span class="lg-state on" id="logFollow">跟随中</span>
+      <button data-action="log-clear">清屏</button>
+    </div>
+    <div id="logBody"><div class="lg lg-hint"><span class="lm">暂无日志 — 扫描/转存/AI 运行时这里会实时滚动</span></div></div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<script src="app.js?v=20260910b" defer></script>
+</body>
+</html>

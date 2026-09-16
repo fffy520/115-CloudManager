@@ -1,0 +1,214 @@
+115 网盘管理器 - 使用说明
+============================
+
+项目简介
+--------
+115 网盘管理器是一个功能强大的本地 115 网盘管理工具，帮助用户高效整理和管理 115 网盘中的海量资源。
+
+核心功能
+--------
+1. 目录浏览：浏览 115 网盘目录结构
+2. 批量扫描：将云端目录同步到本地数据库
+3. 一键转存：批量转存分享链接到网盘
+4. 查重清理：找出并删除重复资源
+5. AI 分类：使用 AI 识别资源类型
+6. 标签管理：给资源打标签，方便筛选
+7. 备份恢复：自动备份和手动恢复
+
+安装步骤
+--------
+1. 安装 Python 3.9+
+   - 下载地址: https://www.python.org/downloads/
+   - 安装时勾选 "Add Python to PATH"
+
+2. 安装依赖
+   pip install -r requirements.txt
+
+3. 配置 Cookie
+   - 用 Chrome/Edge 浏览器打开 https://115.com 并登录
+   - 按 F12 打开开发者工具
+   - 切换到 Network 标签
+   - 点击页面触发请求
+   - 找到 Request Headers → Cookie
+   - 复制整行 Cookie 值
+   - 创建 cookie115.txt 文件，粘贴 Cookie 内容
+
+4. 启动服务
+   - Windows: 双击 启动115管理器.bat
+   - macOS/Linux: ./start.sh 或 python3 server.py
+
+5. 访问界面
+   - 浏览器打开 http://127.0.0.1:8765
+
+快速启动
+--------
+方法一: 使用安装脚本 (推荐)
+   chmod +x install.sh
+   ./install.sh
+   ./start.sh
+
+方法二: 使用 Python 脚本
+   python3 run.py
+
+方法三: 手动启动
+   pip install -r requirements.txt
+   python3 server.py
+
+项目结构
+--------
+115manager/
+├── 核心代码
+│   ├── server.py           # 主服务（FastAPI 应用）
+│   ├── api115.py           # 115 网盘 API 客户端
+│   ├── config.py           # 配置管理
+│   ├── scanner.py          # 目录扫描管理器
+│   ├── transfer_worker.py  # 转存工作线程
+│   ├── ai_worker.py        # AI 分类工作线程
+│   ├── tags.py             # 标签系统
+│   ├── tag_rules.py        # 标签规则引擎
+│   ├── dedup.py            # 查重功能
+│   ├── logbus.py           # 日志系统
+│   └── tmdb.py             # TMDB API 集成
+├── 前端文件
+│   ├── static/index.html   # 前端页面
+│   ├── static/app.js       # 前端逻辑
+│   └── static/style.css    # 样式表
+├── 配置文件
+│   ├── requirements.txt    # Python 依赖
+│   ├── .env.example        # 环境变量模板
+│   ├── ai_config.example.json # AI 配置模板
+│   └── config_example.py   # 配置示例
+├── 启动脚本
+│   ├── start.sh            # Linux/macOS 启动脚本
+│   ├── run.py              # Python 启动脚本
+│   ├── install.sh          # 安装脚本
+│   └── 启动115管理器.bat    # Windows 启动脚本
+└── 文档文件
+    ├── README.md           # 项目文档
+    ├── 项目概览.md         # 项目概览
+    ├── 项目总结.md         # 项目总结
+    ├── 项目结构图.md       # 架构图
+    ├── 使用指南.md         # 使用指南
+    ├── 启动说明.md         # 启动说明
+    ├── 文件清单.md         # 文件清单
+    └── 使用说明.txt        # 本文件
+
+配置说明
+--------
+1. 环境变量配置
+   复制 .env.example 为 .env，按需修改：
+   - PORT=8765           # 服务端口
+   - HOST=0.0.0.0        # 服务地址
+   - TREE_DB=115_tree.db # 数据库路径
+   - COOKIE_FILE=cookie115.txt # Cookie 文件
+   - AI_CONFIG=ai_config.json # AI 配置
+   - BACKUP_DIR=backups  # 备份目录
+   - BACKUP_KEEP_DAILY=7 # 每日备份数量
+   - BACKUP_KEEP_WEEKLY=4 # 每周备份数量
+
+2. AI 配置
+   创建 ai_config.json 文件：
+   {
+     "provider": "deepseek",
+     "api_key": "your_api_key_here",
+     "model": "deepseek-chat",
+     "base_url": "https://api.deepseek.com"
+   }
+
+   支持的 AI 提供商：
+   - DeepSeek
+   - Kimi
+   - OpenAI 兼容接口
+
+使用指南
+--------
+1. 首次使用
+   - 启动服务后，页面右上角显示 Cookie 状态
+   - 配置 Cookie 后状态变为「● Cookie 正常」
+   - 选择一个根目录进行扫描
+   - 扫描完成后即可浏览和搜索
+
+2. 目录浏览
+   - 左上角下拉选择根目录
+   - 点击目录展开浏览
+   - 勾选目录/文件 → 底部弹出批量工具栏
+   - 支持移动、打标签、删除等操作
+
+3. 扫描管理
+   - 选择根目录，点击「开始扫描」
+   - 串行扫描（3-5秒/目录），避免风控
+   - 支持断点续扫，失败自动重试
+   - 可设置定时扫描任务
+
+4. 自动转存
+   - 粘贴分享链接（每行一条）
+   - 解析后确认清单
+   - 选择目标目录，开始转存
+   - 每条间隔 4-6 秒防风控
+
+5. AI 分类
+   - 配置 AI 接口（ai_config.json）
+   - 选择范围，试跑 20 条核对准确率
+   - 全量分析
+   - 审核通过的建议自动落成标签
+
+6. 标签管理
+   - 21 个预设标签（类型/属性/状态/来源）
+   - 支持手动打标、规则打标、AI 落标
+   - 按标签筛选和批量移动
+
+7. 备份恢复
+   - 自动备份数据库和 Cookie
+   - 每日凌晨 3 点自动备份
+   - 支持手动备份和恢复
+
+常见问题
+--------
+Q: 双击 bat 后闪退 / 提示找不到 Python？
+A: 确认 Python 已安装并加入了 PATH。打开 cmd 输入 python --version。
+
+Q: Cookie 显示「失效」？
+A: 按配置步骤重新获取 Cookie。
+
+Q: 扫描很慢？
+A: 扫描是串行的（3-5秒/目录），为了不触发 115 的风控。支持断点续扫。
+
+Q: 删除的文件能恢复吗？
+A: 删除操作会移入 115 回收站，30 天内可手动恢复。
+
+Q: 想换台电脑用？
+A: 把整个文件夹拷过去，新电脑装好 Python，双击 bat 即可。
+
+Q: AI 分类不准确？
+A: 先试跑 20 条核对准确率，调整 AI 配置，使用更强大的 AI 模型。
+
+Q: 转存失败怎么办？
+A: 检查链接是否有效，检查 Cookie 是否过期，检查网络连接。
+
+Q: 如何提高扫描速度？
+A: 减小扫描间隔（有风控风险），只扫描需要的目录，使用定时任务。
+
+安全须知
+--------
+1. cookie115.txt：你的 115 登录凭据，不要外泄
+2. ai_config.json：AI 接口的 API Key，不要外泄
+3. 115_tree.db：包含你的完整网盘目录结构，属于隐私数据
+
+技术支持
+--------
+- 问题反馈：请提供详细的问题描述和错误日志
+- 功能建议：请说明使用场景和期望功能
+- 代码贡献：请遵循代码规范和提交规范
+
+更新日志
+--------
+v1.0.0 (2026-09-14)
+- 初始版本发布
+- 支持目录浏览、扫描、转存、查重
+- 支持 AI 自动分类
+- 支持标签管理
+- 支持备份恢复
+
+许可证
+------
+本项目仅供个人学习使用，请勿用于商业用途。

@@ -2,18 +2,26 @@
 """
 统一配置: 从环境变量 / .env 文件读取, 提供全局默认值
 - 所有模块从这里 import 配置, 不再各自硬编码路径
-- .env 文件放在项目根目录(与115manager同级), 格式 KEY=VALUE
+- .env 文件放在项目目录下即可(也兼容放在其上一级), 格式 KEY=VALUE
 - 优先级: 环境变量 > .env 文件 > 代码默认值
 """
 import os
 
 # ---------- 自动加载 .env ----------
 def _load_dotenv():
-    """从项目根目录加载 .env 文件(无第三方依赖)"""
-    # 向上找: 115manager/config.py -> 115manager/ -> 项目根/
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_path = os.path.join(root, ".env")
-    if not os.path.isfile(env_path):
+    """加载 .env 文件(无第三方依赖)
+
+    按顺序查找, 使用第一个存在的文件:
+      1. 当前工作目录下的 .env   —— 在项目目录内启动(最常见)
+      2. 脚本上一级目录下的 .env —— 项目嵌在父目录中的布局, 保持向后兼容
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(here), ".env"),
+    ]
+    env_path = next((p for p in candidates if os.path.isfile(p)), None)
+    if not env_path:
         return
     with open(env_path, encoding="utf-8") as f:
         for line in f:

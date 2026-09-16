@@ -31,7 +31,8 @@ def _load_dotenv():
 _load_dotenv()
 
 # ---------- 项目路径 ----------
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 使用当前工作目录，而不是脚本所在目录的上级目录
+PROJECT_DIR = os.getcwd()
 
 # ---------- 数据库 ----------
 TREE_DB = os.environ.get("TREE_DB", os.path.join(PROJECT_DIR, "115_tree.db"))

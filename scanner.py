@@ -8,7 +8,6 @@
 import os
 import random
 import sqlite3
-import sys
 import threading
 import time
 import traceback
@@ -23,21 +22,6 @@ RETRY_WAIT = config.SCAN_RETRY_WAIT
 MAX_AUTO_RETRY = config.SCAN_RETRY_MAX
 
 _init_lock = threading.Lock()
-
-
-def _is_reloader_process() -> bool:
-    """判断当前进程是否为 uvicorn reloader 主进程(直接运行 server.py)。
-
-    reloader 主进程: __main__ 模块就是 server.py (python server.py 直接启动);
-    worker 子进程: 由 multiprocessing spawn 创建, __main__ 是 spawn.py, server 作为普通模块被 import。
-    两个进程都会执行 server.py 顶层代码, 若不区分会各自创建一个 ScanManager 和扫描线程,
-    导致任务在 reloader 进程里跑, 而 HTTP 请求(暂停/停止)到达 worker 进程, stop_event 通知不到真正干活的线程。
-    """
-    main_mod = sys.modules.get("__main__")
-    if main_mod is None:
-        return False
-    main_file = getattr(main_mod, "__file__", "") or ""
-    return main_file.endswith("server.py")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -90,11 +74,13 @@ class ScanManager:
         con.close()
         self.worker = None
         self.stop_event = threading.Event()
-        # reloader 主进程不启动扫描线程, 避免与 worker 进程的线程竞争同一任务
-        # (竞争时任务可能在 reloader 进程里跑, 而暂停/停止请求在 worker 进程,
-        #  stop_event 通知不到真正干活的线程)
-        if not _is_reloader_process():
-            self._start_worker()
+        # 始终启动扫描线程。
+        # 本项目启动方式均为单进程直跑(server.py 用 uvicorn.run(app, ...) 且未开 reload;
+        # run.py 亦显式 reload=False)。uvicorn 的 reload/workers 分支要求以 import string
+        # 传入 app, 本项目从未使用, 因此根本不存在"reloader 主进程"。
+        # 旧代码在 __main__.__file__ 以 server.py 结尾时跳过启动, 导致 python server.py
+        # 场景下扫描线程永不创建, 所有扫描任务永久停留在 queued。
+        self._start_worker()
 
     # ---------- 对外 ----------
     def submit(self, target_cid: str, target_name: str, rescan: bool = False, priority: int = 0) -> int:
@@ -162,10 +148,20 @@ class ScanManager:
         logbus.pub("扫描", f"任务 #{job_id} 开始:「{target_name}」", lv="ok")
         try:
             cookie = api115.load_cookie()
-            # 目标自身入树
-            con.execute(
-                "INSERT OR REPLACE INTO tree_nodes(cid,pid,root,name,is_dir,size) VALUES(?,?,?,?,?,?)",
-                (target_cid, target_cid, target_cid, target_name, 1, 0))
+            # 目标自身入树。
+            # 关键: 若该目录已在树中, 必须保留它原有的 pid/root 归属, 只更新名称。
+            # 旧代码用 INSERT OR REPLACE 无条件写成 pid=root=自身, 会把"别人树里的
+            # 子目录"从父目录的浏览列表中摘掉 —— 例如扫描 最近接收/自动转存 之后,
+            # 自动转存 就再也无法从 最近接收 里点开(数据没丢, 但入口消失)。
+            existed = con.execute(
+                "SELECT pid FROM tree_nodes WHERE cid=?", (target_cid,)).fetchone()
+            if existed:
+                con.execute("UPDATE tree_nodes SET name=?, is_dir=1 WHERE cid=?",
+                            (target_name, target_cid))
+            else:
+                con.execute(
+                    "INSERT INTO tree_nodes(cid,pid,root,name,is_dir,size) VALUES(?,?,?,?,1,0)",
+                    (target_cid, target_cid, target_cid, target_name))
             if job["rescan"]:
                 con.execute("DELETE FROM scan_state WHERE cid=?", (target_cid,))
             con.commit()

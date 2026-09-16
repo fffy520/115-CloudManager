@@ -174,8 +174,8 @@ class TransferManager:
         con.close()
         self.worker = None
         self.stop_event = threading.Event()
-        if not scanner._is_reloader_process():
-            self._start_worker()
+        # 单进程直跑, 见 scanner.ScanManager.__init__ 说明: 必须无条件启动转存线程
+        self._start_worker()
 
     def create_task(self, name: str, items: list, target_cid: str, target_name: str) -> int:
         con = get_conn()

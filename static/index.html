@@ -81,7 +81,7 @@
         <option value="name_desc">🔤 名称 Z→A</option>
       </select>
     </div>
-    <div class="sub" style="margin-top:6px">点击目录展开浏览；未扫描目录带 <span class="badge b-warn">未扫</span> 标，点 <span class="badge b-pri">扫</span> 可发起扫描。在线模式读取网盘实时目录，<b>双击「在线浏览」可强制刷新缓存</b>。</div>
+    <div class="sub" style="margin-top:6px">点击目录展开浏览；未扫描目录带 <span class="badge b-warn">未扫</span> 标，点 <span class="badge b-pri">扫</span> 可发起扫描。点击目录名打开详情面板，可选「扫描此目录」（增量续扫）或「强制重扫」（清旧记录、整棵子树重新拉取）。在线模式读取网盘实时目录，<b>双击「在线浏览」可强制刷新缓存</b>。</div>
   </div>
   <div id="treeWrap">
     <div class="card" id="treeBox" style="min-height:300px"></div>
@@ -99,7 +99,8 @@
         <option value="dir">仅目录</option>
         <option value="file">仅文件</option>
       </select>
-      <select id="searchRoot" style="min-width:200px;max-width:280px"><option value="">全部根目录</option></select>
+      <button id="searchRootBtn" data-action="search-root-pick" style="min-width:200px;max-width:280px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="全部根目录">📂 全部根目录</button>
+      <input type="hidden" id="searchRoot" value="">
       <input id="searchMinMB" placeholder="≥ MB" type="number" style="width:80px" title="最小大小（仅文件）">
       <input id="searchMaxMB" placeholder="≤ MB" type="number" style="width:80px" title="最大大小（仅文件）">
       <button data-action="search-go" class="pri" style="padding:6px 18px">搜索</button>
@@ -123,7 +124,8 @@
   <div class="card">
     <h3>发起扫描</h3>
     <div class="row">
-      <select id="scanRootSel" style="min-width:280px"><option>加载中…</option></select>
+      <button id="scanRootBtn" data-action="scan-root-pick" style="min-width:280px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="点击选择要扫描的目录">📂 点击选择目录…</button>
+      <input type="hidden" id="scanRootSel" value="">
       <label class="sub"><input type="checkbox" id="scanRescan"> 强制重扫（清旧记录）</label>
       <button class="pri" data-action="scan-start">开始扫描</button>
     </div>
@@ -136,7 +138,8 @@
   <div class="card">
     <h3>定时扫描</h3>
     <div class="row" style="margin-bottom:10px">
-      <select id="schRootSel" style="min-width:280px"><option>加载中…</option></select>
+      <button id="schRootBtn" data-action="sch-root-pick" style="min-width:280px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="点击选择定时扫描的目录">📂 点击选择目录…</button>
+      <input type="hidden" id="schRootSel" value="">
       <input type="time" id="schTime" value="03:00">
       <button class="pri" data-action="sched-add">添加定时</button>
     </div>
@@ -189,7 +192,8 @@
   <div class="card">
     <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <span class="sub">范围</span>
-      <select id="dupScope" style="min-width:220px;max-width:320px"><option value="">全部一级目录（默认）</option></select>
+      <button id="dupScopeBtn" data-action="dup-scope-pick" style="min-width:220px;max-width:320px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="全部一级目录（默认）">📂 全部一级目录（默认）</button>
+      <input type="hidden" id="dupScope" value="">
       <span class="sub">过滤</span>
       <input id="dupFilter" placeholder="按组名/目录名筛选…" style="flex:1;min-width:140px;max-width:240px">
       <span class="sub">排序</span>
@@ -385,25 +389,6 @@
   <button class="bb-cancel" data-action="bb-clear">取消</button>
 </div>
 <div id="bbPop"></div>
-
-<!-- 批量移动弹窗 -->
-<div class="modal-bg" id="moveDlg" style="display:none">
-  <div class="modal" style="max-width:560px">
-    <h3><span>批量移动 — 选择目标目录</span><span class="close" data-action="move-close">×</span></h3>
-    <div class="row" style="margin-bottom:8px;gap:6px">
-      <input id="moveSearch" placeholder="过滤已加载目录名…" style="flex:1;min-width:180px">
-      <button data-action="move-search-more">搜本地库</button>
-    </div>
-    <div id="moveSearchOut"></div>
-    <div class="sub">在下方目录树中点选目标目录（点名称选中，点 ▶ 展开）</div>
-    <div id="moveTree" style="max-height:400px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px"></div>
-    <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-      <span class="sub">目标：</span><b id="moveTargetName" style="color:var(--accent)">未选择</b>
-      <span style="flex:1"></span>
-      <button class="pri" data-action="move-do">移动选中项</button>
-    </div>
-  </div>
-</div>
 
 <!-- 打标签弹窗 -->
 <div class="modal-bg" id="tagDlg" style="display:none">

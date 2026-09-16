@@ -161,9 +161,11 @@ width:min(560px,92vw);max-height:320px;overflow:auto;padding:8px 8px 4px}
 #bbPop .bp-foot{text-align:right;padding:8px 4px 2px}
 /* ---------- 移动弹窗搜索 ---------- */
 #moveSearchOut{margin-bottom:8px}
-#moveSearchOut .ms-row{display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:13px}
-#moveSearchOut .ms-row:hover{background:#f0f4fa}
-#moveSearchOut .ms-path{color:var(--sub);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 搜索结果行样式：批量移动旧弹窗(#moveSearchOut) 与公共目录选择器([data-pd="searchout"]) 共用 */
+#moveSearchOut .ms-row,[data-pd="searchout"] .ms-row{display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:13px}
+#moveSearchOut .ms-row:hover,[data-pd="searchout"] .ms-row:hover{background:#f0f4fa}
+#moveSearchOut .ms-path,[data-pd="searchout"] .ms-path{color:var(--sub);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-pd="searchout"]{margin-bottom:8px}
 /* ---------- 备份 ---------- */
 .bk-row{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px}
 .bk-row:last-child{border-bottom:none}

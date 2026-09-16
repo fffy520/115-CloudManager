@@ -40,7 +40,7 @@ rem ---------- 3. 检查依赖，缺失则自动安装 ----------
 if errorlevel 1 (
     echo [1/2] 首次运行，正在安装依赖（约 1 分钟，请耐心等待）...
     echo.
-    "%PY%" -m pip install -r "..\requirements.txt"
+    "%PY%" -m pip install -r "requirements.txt"
     if errorlevel 1 (
         echo.
         echo [错误] 依赖安装失败，请检查网络连接后重新双击本文件。

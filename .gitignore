@@ -49,4 +49,5 @@ logs/
 *.tmp
 *.temp
 *.bak
+*.bak-*
 *.backup

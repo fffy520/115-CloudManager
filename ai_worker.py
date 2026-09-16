@@ -713,8 +713,8 @@ class AiManager:
         con.close()
         self.worker = None
         self.stop_event = threading.Event()
-        if not scanner._is_reloader_process():
-            self._start_worker()
+        # 单进程直跑, 见 scanner.ScanManager.__init__ 说明: 必须无条件启动分析线程
+        self._start_worker()
 
     def create_batch(self, scope_cid: str, scope_name: str, limit: int = 0) -> int:
         con = get_conn()

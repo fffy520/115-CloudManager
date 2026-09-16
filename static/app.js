@@ -520,21 +520,26 @@ async function loadRoots(){
   if(S.roots) return S.roots;
   const d=await api('/api/roots');
   S.roots=d.items;
-  fillRootSelects();
+  refreshDirPickerLabels();
   return S.roots;
 }
-function fillRootSelects(){
+/* 目录选择器已全部改为「按钮 + 公共目录选择器 pickDir」，不再填充原生下拉。
+   此处在 roots 载入后，把各按钮上残留的 cid 文案补全成目录名。 */
+function refreshDirPickerLabels(){
   if(!S.roots) return;
-  const opt=S.roots.map(i=>`<option value="${i.cid}">${esc(i.name)}${i.scan_state==='done'?' ✓':''}</option>`).join('');
-  /* 重填时保留用户当前选择 */
-  ['scanRootSel','schRootSel'].forEach(id=>{
-    const el=$('#'+id); const cur=el.value; el.innerHTML=opt;
-    if(cur && [...el.options].some(o=>o.value===cur)) el.value=cur;
+  const pairs=[
+    ['#searchRoot','#searchRootBtn'], ['#scanRootSel','#scanRootBtn'], ['#schRootSel','#schRootBtn'],
+    ['#aiScopeCid','#aiScopeDisplay'], ['#tfTargetCid','#tfTargetBtn'], ['#dupScope','#dupScopeBtn'],
+  ];
+  pairs.forEach(([i,b])=>{
+    const iv=$(i), bv=$(b);
+    if(!iv || !bv || !iv.value) return;
+    const hit=S.roots.find(x=>x.cid===iv.value);
+    if(hit && hit.name && !bv.textContent.includes(hit.name)){
+      bv.textContent='📂 '+hit.name;
+      bv.title=hit.name;
+    }
   });
-  const sr=$('#searchRoot'); const cs=sr.value;
-  sr.innerHTML='<option value="">全部根目录</option>'+opt; if(cs) sr.value=cs;
-  const ds=$('#dupScope'); const cd=ds.value;
-  ds.innerHTML='<option value="">全部一级目录（默认）</option>'+opt; if(cd) ds.value=cd;
 }
 
 /**
@@ -780,6 +785,7 @@ function showDetail(node, live){
   if(node.is_dir){
     html+=`<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="pri" data-action="d-scan">扫描此目录</button>
+      <button data-action="d-rescan" title="清除该目录已扫记录，重新完整扫描一遍">强制重扫</button>
       <button data-action="d-mkdir">新建子文件夹</button>
       ${live?'':'<button data-action="d-live">在线浏览</button>'}${tagBtn}
     </div>`;
@@ -814,11 +820,12 @@ async function copyDownloadLink(cid){
     toast(ok?'✓ 下载直链已复制到剪贴板':'复制失败（可点“获取下载直链”手动复制）', !ok);
   }catch(e){ toast('获取直链失败: '+e.message,true); }
 }
-async function scanOne(cid,name){
+async function scanOne(cid,name,rescan){
+  const force=!!rescan;
   try{
     await api('/api/scan/start',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cid,name,rescan:false})});
-    toast('已提交扫描任务');
+      body:JSON.stringify({cid,name,rescan:force})});
+    toast(force?'已提交强制重扫任务（清旧记录）':'已提交扫描任务（增量续扫）');
     applyTab('scan'); syncHash();
     S.roots=null;
   }catch(e){ toast(e.message,true); }
@@ -968,12 +975,42 @@ $('#searchQ').addEventListener('keydown', e=>{
 
 /* ============ 7. 搜索 ============ */
 let searchHistCache=[];
+/* 搜索范围：按钮 + 公共目录选择器（原来是一级目录原生下拉） */
+function setSearchRoot(cid, name){
+  cid = cid||'';
+  const inp=$('#searchRoot'); if(inp) inp.value=cid;
+  const btn=$('#searchRootBtn'); if(!btn) return;
+  if(!cid){
+    btn.textContent='📂 全部根目录'; btn.title='全部根目录';
+    return;
+  }
+  const nm = name || (S.roots||[]).find(x=>x.cid===cid)?.name || cid;
+  btn.textContent='📂 '+nm; btn.title=nm;
+  /* 只有 cid 没名字时，异步补全真实目录名（例如从地址栏恢复） */
+  if(!name && !(S.roots||[]).some(x=>x.cid===cid)){
+    api('/api/node/'+cid).then(d=>{
+      if(d && d.exists && d.name && d.name!==cid){ btn.textContent='📂 '+d.name; btn.title=d.name; }
+    }).catch(()=>{});
+  }
+}
+async function searchRootPick(){
+  const cur=$('#searchRoot').value;
+  const sel = await pickDir({
+    title:'选择搜索范围',
+    cid: cur,
+    name: cur ? ($('#searchRootBtn').textContent||'').replace('📂 ','').trim() : '',
+    persistKey:'search_root',
+    allowAll:true, allLabel:'全部根目录',
+  });
+  if(!sel) return;
+  setSearchRoot(sel.cid, sel.name);
+}
 async function loadSearchPage(params){
   try{ await loadRoots(); }catch(e){}
   if(params){
     if(params.has('q'))    $('#searchQ').value=params.get('q');
     if(params.has('type')) $('#searchType').value=params.get('type');
-    if(params.has('root')) $('#searchRoot').value=params.get('root');
+    if(params.has('root')) setSearchRoot(params.get('root'));
     if(params.has('min'))  $('#searchMinMB').value=params.get('min');
     if(params.has('max'))  $('#searchMaxMB').value=params.get('max');
     if(params.get('q')) doSearch();
@@ -1015,7 +1052,7 @@ async function loadHistory(){
 function runHistory(i){
   const h=searchHistCache[i]; if(!h) return;
   $('#searchQ').value=h.q;
-  if(h.scope) $('#searchRoot').value=h.scope;
+  if(h.scope) setSearchRoot(h.scope);
   doSearch();
 }
 async function clearHistory(){
@@ -1180,13 +1217,61 @@ function openInTree(cid){
 }
 
 /* ============ 8. 扫描管理 ============ */
+/* 扫描目标目录：按钮 + 公共目录选择器（与 转存/查重/AI 一致） */
+function scanTargetEls(which){
+  return which==='scan'
+    ? {btn:'#scanRootBtn', inp:'#scanRootSel', key:'scan_target'}
+    : {btn:'#schRootBtn',  inp:'#schRootSel',  key:'sch_target'};
+}
+function setScanTarget(which, cid, name){
+  const {btn,inp,key}=scanTargetEls(which);
+  cid = cid||''; name = name||cid;
+  const be=$(btn); const ie=$(inp);
+  if(ie) ie.value = cid;
+  if(be){
+    be.textContent = cid ? ('📂 '+name) : '📂 点击选择目录…';
+    be.title = cid ? name : '点击选择目录…';
+  }
+}
+/* 读取按钮上的真实目录名（去掉图标） */
+function scanTargetName(which){
+  const {btn}=scanTargetEls(which);
+  const be=$(btn);
+  return ((be && be.textContent)||'').replace('📂 ','').trim();
+}
+async function scanTargetPick(which){
+  const {inp,key}=scanTargetEls(which);
+  const cur=$(inp) ? $(inp).value : '';
+  const sel = await pickDir({
+    title: which==='scan' ? '选择要扫描的目录' : '选择定时扫描的目录',
+    cid: cur,
+    name: cur ? scanTargetName(which) : '',
+    persistKey: key,
+  });
+  if(!sel) return;
+  setScanTarget(which, sel.cid, sel.name);
+  localStorage.setItem(key+'_cid', sel.cid);
+  localStorage.setItem(key+'_name', sel.name);
+}
+async function scanRootPick(){ return scanTargetPick('scan'); }
+async function schRootPick(){ return scanTargetPick('sch'); }
+/* 恢复上次选择的扫描目标 */
+function restoreScanTargets(){
+  ['scan','sch'].forEach(which=>{
+    const {inp,key}=scanTargetEls(which);
+    if($(inp) && $(inp).value) return;       // 已有选择则不覆盖
+    const cid=localStorage.getItem(key+'_cid');
+    if(cid) setScanTarget(which, cid, localStorage.getItem(key+'_name')||cid);
+  });
+}
 async function loadScanPage(){
   try{ await loadRoots(); }catch(e){}
+  restoreScanTargets();
   refreshJobs(); refreshSched();
 }
 async function startScan(){
   const cid=$('#scanRootSel').value; if(!cid) return toast('先选择目录',true);
-  const name=(S.roots||[]).find(x=>x.cid===cid)?.name||cid;
+  const name=scanTargetName('scan')||cid;
   try{
     const d=await api('/api/scan/start',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({cid,name,rescan:$('#scanRescan').checked})});
@@ -1292,7 +1377,7 @@ async function delSched(id){
 }
 async function addSched(){
   const cid=$('#schRootSel').value; if(!cid) return toast('先选择目录',true);
-  const name=(S.roots||[]).find(x=>x.cid===cid)?.name||cid;
+  const name=scanTargetName('sch')||cid;
   const [h,m]=($('#schTime').value||'03:00').split(':').map(Number);
   try{
     await api('/api/schedules',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1315,92 +1400,308 @@ async function loadTransferPage(){
   }
 }
 
-/* 转存目标目录：树形选择弹窗 */
-function tfTargetPick(){
-  const old=document.getElementById('tfTargetDlg'); if(old) old.remove();
-  const bg=document.createElement('div');
-  bg.id='tfTargetDlg'; bg.className='modal-bg'; bg.style.zIndex=70;
-  bg.innerHTML=`<div class="modal" style="max-width:500px">
-    <h3><span>选择转存目标（▶ 展开子目录）</span><span class="close" data-action="tf-target-close">×</span></h3>
-    <div id="tfTargetTree" style="max-height:420px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px"></div>
-    <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
-      <span class="sub">当前：</span><b id="tfTargetCur" style="color:var(--accent)">${esc(document.getElementById('tfTargetBtn').textContent.replace('📂 ','').trim()||'未选择')}</b>
-      <span style="flex:1"></span>
-      <button data-action="tf-target-ok" class="pri">确定</button>
-      <button data-action="tf-target-close">取消</button>
-    </div>
-  </div>`;
-  bg.onclick=e=>{ if(e.target===bg) bg.remove(); };
-  document.body.appendChild(bg);
+/* ============ 公共目录选择器 pickDir ============
+ * 全站统一的树形目录选择弹窗：本地数据 / 在线浏览 + 排序 + 展开记忆 + 可选过滤/搜本地库。
+ * 用法: const sel = await pickDir({title, cid, name, persistKey, allowAll, allLabel, withFilter});
+ * 返回: {cid, name, mode, exists, scan_state}；用户取消返回 null。
+ * 说明: persistKey 决定记忆键名，展开记忆存 <persistKey>_expanded、排序存 <persistKey>_sort、
+ *       上次模式存 <persistKey>_mode —— 各处选择器互不干扰。
+ */
+function pickDir(opts){
+  opts = opts || {};
+  const pkey      = opts.persistKey || 'pickdir';
+  const allowAll  = !!opts.allowAll;
+  const withFilter= !!opts.withFilter;
+  const allLabel  = opts.allLabel || '全部（默认）';
+  /* allowAll 那一项代表的 cid：查重是 ''（不限定范围），AI 移动计划的父目录是 '0'（网盘根） */
+  const allCid    = opts.allCid !== undefined ? opts.allCid : '';
+  const dlgId     = opts.dlgId || 'pickDirDlg';
 
-  let picked={cid:document.getElementById('tfTargetCid').value, name:document.getElementById('tfTargetBtn').textContent.replace('📂 ','').trim()};
+  return new Promise(resolve=>{
+    const stale=document.getElementById(dlgId); if(stale) stale.remove();
 
-  function ascRow(node, depth){
-    const wrap=document.createElement('div');
-    const row=document.createElement('div'); row.className='mt-row';
-    row.style.paddingLeft=(depth*16)+'px';
-    if(picked.cid===node.cid) row.classList.add('mt-sel');
-    const tw=document.createElement('span'); tw.className='tw'; tw.textContent=node.is_dir?'▶':'·';
-    const nm=document.createElement('span'); nm.textContent=node.name; nm.title=node.name;
-    if(node.is_dir) nm.className='tname dir';
-    row.appendChild(tw); row.appendChild(nm);
-    let kids=document.createElement('div'); kids.style.display='none';
-    if(node.is_dir){
-      row.style.cursor='pointer';
-      let built=false;
-      row.onclick=async e=>{
-        e.stopPropagation();
-        const isHidden = kids.style.display==='none' || kids.style.display==='';
-        if(isHidden){
-          kids.style.display='block';
-          tw.textContent='▼';
-          if(!built){
-            kids.innerHTML='<div class="sub" style="padding:4px 8px">加载中…</div>';
-            let ch=[];
-            try{ const d=await api('/api/tree/'+node.cid); ch=d.children||d.items||[]; }catch(_){}
-            kids.innerHTML='';
-            const dirs=ch.filter(c=>c.is_dir);
-            if(!dirs.length){
-              kids.innerHTML='<div class="sub" style="padding:4px 8px">无子文件夹</div>';
-            } else {
-              built=true;
-              dirs.forEach(c=>kids.appendChild(ascRow(c,depth+1)));
+    let picked = {cid: opts.cid||'', name: opts.name|| (allowAll && (opts.cid||'')===allCid ? allLabel : '')};
+    let currentMode = 'local';
+    try{ currentMode = localStorage.getItem(pkey+'_mode') || 'local'; }catch(_){}
+
+    const expandedSet = new Set();
+    try{ (JSON.parse(localStorage.getItem(pkey+'_expanded')||'[]')||[]).forEach(c=>expandedSet.add(c)); }catch(_){}
+    const saveExpanded = ()=>{ try{ localStorage.setItem(pkey+'_expanded', JSON.stringify([...expandedSet])); }catch(_){} };
+
+    const bg = document.createElement('div');
+    bg.id = dlgId; bg.className = 'modal-bg'; bg.style.zIndex = 70;
+    bg.innerHTML = `<div class="modal" style="max-width:520px">
+      <h3><span>${esc(opts.title||'选择目录')}</span><span class="close" data-pd="close">×</span></h3>
+      <div class="row" style="gap:6px;margin-bottom:6px;align-items:center">
+        <button class="lg-chip" data-pd-mode="local">💾 本地数据</button>
+        <button class="lg-chip" data-pd-mode="live">🌐 在线浏览</button>
+        <span style="flex:1"></span>
+        <select data-pd="sort" style="min-width:120px;font-size:12px">
+          <option value="time_desc">⏰ 时间(最新)</option>
+          <option value="time_asc">⏰ 时间(最早)</option>
+          <option value="name_asc">🔤 名称 A→Z</option>
+          <option value="name_desc">🔤 名称 Z→A</option>
+        </select>
+      </div>
+      ${withFilter?`<div class="row" style="gap:6px;margin-bottom:6px">
+        <input data-pd="filter" placeholder="过滤已加载目录名…" style="flex:1;min-width:170px">
+        <button data-pd="search">搜本地库</button>
+      </div>
+      <div data-pd="searchout"></div>`:''}
+      ${allowAll?`<div class="mt-row" data-pd="all"><span class="tw">🗂</span><span>${esc(allLabel)}</span></div>`:''}
+      <div data-pd="tree" style="max-height:400px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px"></div>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="sub">当前：</span><b data-pd="cur" style="color:var(--accent)">${esc(picked.name||'未选择')}</b>
+        <span style="flex:1"></span>
+        <button data-pd="ok" class="pri">确定</button>
+        <button data-pd="cancel">取消</button>
+      </div>
+    </div>`;
+    bg.onclick = e => { if(e.target===bg) done(null); };
+    document.body.appendChild(bg);
+
+    const q     = s => bg.querySelector('[data-pd="'+s+'"]');
+    const tree  = q('tree');
+    const curEl = q('cur');
+    const sortEl= q('sort');
+
+    try{ if(sortEl) sortEl.value = localStorage.getItem(pkey+'_sort') || 'time_desc'; }catch(_){}
+
+    function done(val){
+      document.removeEventListener('keydown', onEsc, true);
+      bg.remove();
+      resolve(val);
+    }
+    function onEsc(e){ if(e.key==='Escape') done(null); }
+    document.addEventListener('keydown', onEsc, true);
+
+    function markPicked(cid, name){
+      picked = {cid:cid, name:name};
+      if(curEl) curEl.textContent = name || '未选择';
+      bg.querySelectorAll('.mt-row').forEach(r=>r.classList.remove('mt-sel'));
+      if(cid){
+        const row = tree.querySelector('.mt-row[data-cid="'+CSS.escape(cid)+'"]');
+        if(row) row.classList.add('mt-sel');
+      }
+    }
+
+    function sortItems(items){
+      const v = (sortEl && sortEl.value) || 'time_desc';
+      const [key, asc] = v.split('_');
+      return items.sort((a,b)=>{
+        let va, vb;
+        if(key==='time'){ va = parseInt(a.cid)||0; vb = parseInt(b.cid)||0; }
+        else { va = (a.name||'').toLowerCase(); vb = (b.name||'').toLowerCase(); }
+        if(va<vb) return asc==='asc' ? -1 : 1;
+        if(va>vb) return asc==='asc' ?  1 : -1;
+        return 0;
+      });
+    }
+
+    function pdRow(node, depth){
+      const wrap = document.createElement('div');
+      wrap.className = 'twrap'; wrap.dataset.cid = node.cid;
+      const row = document.createElement('div');
+      row.className = 'mt-row'; row.dataset.cid = node.cid;
+      row.style.paddingLeft = (depth*16)+'px';
+      if(picked.cid === node.cid) row.classList.add('mt-sel');
+      const tw = document.createElement('span'); tw.className='tw'; tw.textContent = node.is_dir?'▶':'·';
+      const nm = document.createElement('span'); nm.textContent = node.name; nm.title = node.name;
+      if(node.is_dir) nm.className = 'tname dir';
+      const meta = document.createElement('span'); meta.className='sub';
+      meta.style.cssText = 'margin-left:6px;font-size:11px';
+      meta.textContent = node.is_dir ? (node.child_count!=null ? node.child_count+' 项' : '') : '';
+      row.appendChild(tw); row.appendChild(nm); row.appendChild(meta);
+      const kids = document.createElement('div'); kids.style.display='none';
+      if(node.is_dir){
+        row.style.cursor = 'pointer';
+        let built = false;
+        row.onclick = async e=>{
+          e.stopPropagation();
+          const hidden = (kids.style.display==='none' || kids.style.display==='');
+          if(hidden){
+            kids.style.display='block'; tw.textContent='▼';
+            expandedSet.add(node.cid); saveExpanded();
+            if(!built){
+              kids.innerHTML = '<div class="sub" style="padding:4px 8px">加载中…</div>';
+              const sv = (sortEl && sortEl.value) || 'time_desc';
+              let ch = [];
+              if(currentMode==='live'){
+                try{ const d = await api('/api/live/'+node.cid); ch = d.children||d.items||[]; }catch(_){}
+                if(ch.length) sortItems(ch);
+              } else {
+                try{ const d = await api('/api/tree/'+node.cid+'?sort='+sv); ch = d.children||d.items||[]; }catch(_){}
+              }
+              kids.innerHTML='';
+              const dirs = ch.filter(c=>c.is_dir);
+              if(!dirs.length){
+                kids.innerHTML='<div class="sub" style="padding:4px 8px">无子文件夹</div>';
+              } else {
+                built = true;
+                dirs.forEach(c=>kids.appendChild(pdRow(c, depth+1)));
+                kids.querySelectorAll(':scope > .twrap').forEach(w=>{
+                  if(expandedSet.has(w.dataset.cid)){
+                    const t2 = w.querySelector(':scope > .mt-row > .tw');
+                    if(t2 && t2.textContent==='▶') t2.click();
+                  }
+                });
+                applyFilter();
+              }
             }
+          } else {
+            kids.style.display='none'; tw.textContent='▶';
+            expandedSet.delete(node.cid); saveExpanded();
           }
-        }else{
-          kids.style.display='none';
-          tw.textContent='▶';
+          markPicked(node.cid, node.name);
+        };
+      }
+      wrap.appendChild(row); wrap.appendChild(kids);
+      return wrap;
+    }
+
+    function applyFilter(){
+      if(!withFilter) return;
+      const fi = q('filter'); if(!fi) return;
+      const s = fi.value.trim().toLowerCase();
+      const rows = tree.querySelectorAll('.mt-row');
+      if(!s){ rows.forEach(r=>r.classList.remove('mv-hide')); return; }
+      rows.forEach(r=>r.classList.add('mv-hide'));
+      rows.forEach(r=>{
+        if(r.textContent.toLowerCase().includes(s)){
+          r.classList.remove('mv-hide');
+          let el = r.parentElement;
+          while(el && el!==tree){
+            const prev = el.previousElementSibling;
+            if(prev && prev.classList && prev.classList.contains('mt-row')) prev.classList.remove('mv-hide');
+            el = el.parentElement;
+          }
         }
-        picked={cid:node.cid, name:node.name};
-        document.getElementById('tfTargetCur').textContent=node.name;
-        bg.querySelectorAll('.mt-row').forEach(r=>r.classList.remove('mt-sel'));
-        row.classList.add('mt-sel');
+      });
+    }
+
+    function restoreExpanded(){
+      let opened = false;
+      tree.querySelectorAll('.twrap').forEach(w=>{
+        if(expandedSet.has(w.dataset.cid)){
+          const tw = w.querySelector(':scope > .mt-row > .tw');
+          if(tw && tw.textContent==='▶'){ tw.click(); opened = true; }
+        }
+      });
+      if(opened) setTimeout(restoreExpanded, 300);
+    }
+
+    async function buildTree(mode){
+      currentMode = mode;
+      try{ localStorage.setItem(pkey+'_mode', mode); }catch(_){}
+      bg.querySelectorAll('[data-pd-mode]').forEach(b=>b.classList.toggle('on', b.dataset.pdMode===mode));
+      tree.innerHTML = '<div class="sub" style="padding:8px">加载中…</div>';
+      try{
+        if(mode==='live'){
+          const d = await api('/api/roots');
+          tree.innerHTML='';
+          (d.items||[]).filter(r=>r.is_dir).forEach(r=>tree.appendChild(pdRow({...r, is_dir:1}, 0)));
+        } else {
+          try{ await loadRoots(); }catch(_){}
+          tree.innerHTML='';
+          const roots = S.roots || [];
+          if(!roots.length){ tree.innerHTML='<div class="sub" style="padding:8px">暂无本地数据的根目录</div>'; return; }
+          roots.forEach(r=>tree.appendChild(pdRow({...r, is_dir:1}, 0)));
+        }
+        applyFilter();
+        restoreExpanded();
+      }catch(e){
+        tree.innerHTML = '<div class="sub" style="padding:8px;color:var(--danger)">加载失败: '+esc(e.message)+'</div>';
+      }
+    }
+
+    bg.querySelectorAll('[data-pd-mode]').forEach(b=>{
+      b.onclick = ()=>buildTree(b.dataset.pdMode);
+    });
+    if(sortEl) sortEl.addEventListener('change', ()=>{
+      try{ localStorage.setItem(pkey+'_sort', sortEl.value); }catch(_){}
+      buildTree(currentMode);
+    });
+
+    if(withFilter){
+      const fi = q('filter'); if(fi) fi.oninput = applyFilter;
+      const sb = q('search');
+      if(sb) sb.onclick = async ()=>{
+        const s = (fi.value||'').trim();
+        if(s.length<2){ toast('至少 2 个字',true); return; }
+        const out = q('searchout');
+        out.innerHTML = '<div class="sub" style="padding:4px">搜索中…</div>';
+        try{
+          const d = await api('/api/search?type=dir&q='+encodeURIComponent(s));
+          if(!d.rows.length){ out.innerHTML='<div class="sub" style="padding:4px">本地库无匹配目录</div>'; return; }
+          out.innerHTML = d.rows.slice(0,20).map(r=>`<div class="ms-row" data-pd-pick="${esc(r.cid)}" data-name="${esc(r.name)}">
+              <span>📁</span><span title="${esc(r.name)}">${esc(r.name)}</span>
+              <span class="ms-path" title="${esc(r.path)}">${esc(r.path)}</span></div>`).join('')
+            + (d.rows.length>20 ? `<div class="sub" style="padding:2px 6px">…共 ${d.rows.length} 条，仅显示前 20 条</div>` : '');
+          out.querySelectorAll('[data-pd-pick]').forEach(el=>{
+            el.onclick = ()=>{
+              markPicked(el.dataset.pdPick, el.dataset.name);
+              out.innerHTML = '';
+              const row = tree.querySelector('.mt-row[data-cid="'+CSS.escape(el.dataset.pdPick)+'"]');
+              if(row) row.scrollIntoView({block:'nearest'});
+            };
+          });
+        }catch(e){ out.innerHTML='<div class="sub" style="padding:4px;color:var(--danger)">'+esc(e.message)+'</div>'; }
       };
     }
-    wrap.appendChild(row); wrap.appendChild(kids);
-    return wrap;
-  }
 
-  async function buildTree(){
-    const tree=document.getElementById('tfTargetTree');
-    tree.innerHTML='<div class="sub" style="padding:8px">加载中…</div>';
-    let roots=[];
-    try{ const d=await api('/api/roots'); roots=d.items||[]; }catch(_){}
-    tree.innerHTML='';
-    if(!roots.length){ tree.innerHTML='<div class="empty">无目录</div>'; return; }
-    roots.forEach(r=>tree.appendChild(ascRow(r,0)));
-  }
-  buildTree();
+    if(allowAll){
+      const allEl = q('all');
+      if(allEl){
+        if(picked.cid === allCid) allEl.classList.add('mt-sel');
+        allEl.onclick = ()=>{
+          markPicked(allCid, allLabel);
+          allEl.classList.add('mt-sel');
+        };
+      }
+    }
 
-  bg.querySelector('[data-action="tf-target-ok"]').onclick=()=>{
-    if(!picked.cid){ toast('请先选择一个目录',true); return; }
-    document.getElementById('tfTargetCid').value=picked.cid;
-    document.getElementById('tfTargetBtn').textContent='📂 '+picked.name;
-    localStorage.setItem('tf_target_cid', picked.cid);
-    localStorage.setItem('tf_target_name', picked.name);
-    bg.remove();
-  };
-  bg.querySelectorAll('[data-action="tf-target-close"]').forEach(b=>b.onclick=()=>bg.remove());
+    q('ok').onclick = async ()=>{
+      if(allowAll && picked.cid === allCid){
+        done({cid:allCid, name:allLabel, mode:currentMode, exists:true, all:true});
+        return;
+      }
+      if(!picked.cid){ toast('请先选择一个目录',true); return; }
+      /* 统一校验是否已入库：未入库时明确提示（在线模式尤其容易选到未扫描目录） */
+      let exists = null, scanState = null;
+      try{
+        const d = await api('/api/node/'+picked.cid);
+        exists = !!d.exists; scanState = d.scan_state || null;
+      }catch(_){ exists = null; }
+      if(exists === false){
+        const go = await appConfirm({
+          title:'该目录尚未扫描入库',
+          message:`「${picked.name}」还不在本地库里。\n依赖本地库的功能（例如查重、统计）可能得到空结果。\n\n仍要选择它吗？`,
+          okText:'仍然选择',
+        });
+        if(!go) return;
+      }
+      done({cid:picked.cid, name:picked.name, mode:currentMode, exists:exists, scan_state:scanState});
+    };
+    q('cancel').onclick = ()=>done(null);
+    q('close').onclick  = ()=>done(null);
+
+    buildTree(currentMode);
+  });
+}
+
+/* 转存目标目录：复用公共目录选择器 */
+async function tfTargetPick(){
+  const sel = await pickDir({
+    title:'选择转存目标',
+    cid:  document.getElementById('tfTargetCid').value,
+    name: document.getElementById('tfTargetBtn').textContent.replace('📂 ','').trim(),
+    persistKey:'tf_target',
+  });
+  if(!sel) return;
+  document.getElementById('tfTargetCid').value = sel.cid;
+  document.getElementById('tfTargetBtn').textContent = '📂 ' + sel.name;
+  localStorage.setItem('tf_target_cid', sel.cid);
+  localStorage.setItem('tf_target_name', sel.name);
 }
 async function doParse(items, src){
   if(!items.length){ toast('没有解析到有效的 115 分享链接',true); return; }
@@ -1519,9 +1820,29 @@ async function toggleTask(id){
 }
 
 /* ============ 10. 结果与查重 ============ */
+/* 查重范围：按钮 + 公共目录选择器（原为原生下拉，只能选一级目录） */
+function setDupScope(cid, name){
+  cid = cid||'';
+  $('#dupScope').value = cid;
+  const btn = $('#dupScopeBtn');
+  if(btn) btn.textContent = cid ? ('📂 ' + (name||cid)) : '📂 全部一级目录（默认）';
+  if(btn) btn.title = cid ? (name||cid) : '全部一级目录（默认）';
+}
+async function dupScopePick(){
+  const cur = $('#dupScope').value;
+  const curName = ($('#dupScopeBtn').textContent||'').replace('📂 ','').trim();
+  const sel = await pickDir({
+    title:'选择查重范围',
+    cid: cur, name: curName,
+    persistKey:'dup_scope',
+    allowAll:true, allLabel:'全部一级目录（默认）',
+  });
+  if(!sel) return;
+  setDupScope(sel.cid, sel.name);
+  loadDupPage();
+}
 function bindDupControls(){
   $('#dupRefresh').onclick=()=>loadDupPage();
-  $('#dupScope').onchange=()=>loadDupPage();
   $('#dupSort').onchange=()=>renderDupList();
   $('#dupFilter').oninput=()=>renderDupList();
   $('#dupKeepN').onchange=()=>renderDupList();
@@ -1536,7 +1857,20 @@ function bindDupControls(){
 }
 async function loadDupPage(params){
   try{
-    if(params && params.has('scope')) $('#dupScope').value=params.get('scope');
+    if(params && params.has('scope')){
+      const cid = params.get('scope')||'';
+      let nm = cid;
+      if(cid){
+        /* 优先取 /api/roots 的名字：个别自根节点在本地库里 name 被写成了 cid 数字串 */
+        try{
+          await loadRoots();
+          const r=(S.roots||[]).find(x=>x.cid===cid);
+          if(r && r.name) nm=r.name;
+          else { const d=await api('/api/node/'+cid); if(d.exists && d.name && d.name!==cid) nm=d.name; }
+        }catch(_){}
+      }
+      setDupScope(cid, nm);
+    }
     const scope=$('#dupScope').value||'';
     const [s,d]=await Promise.all([api('/api/stats'), api('/api/dups'+(scope?'?scope='+encodeURIComponent(scope):''))]);
     S.dup.data=d;
@@ -1721,109 +2055,18 @@ async function runBatchDelete(items,label){
 
 /* ============ 11. 批量移动 / 浮条 ============ */
 let moveSel={cid:null,name:''};
+/* 批量移动：复用公共目录选择器（保留「过滤已加载目录」+「搜本地库」） */
 async function openMoveDlg(){
   if(!S.sel.size){ toast('请先勾选要移动的项',true); return; }
-  moveSel={cid:null,name:''};
-  $('#moveTargetName').textContent='未选择';
-  $('#moveSearch').value='';
-  $('#moveSearchOut').innerHTML='';
-  const el=$('#moveTree'); el.innerHTML='';
-  $('#moveDlg').style.display='flex';
-  const rootRow=mtRow({cid:'0',name:'📁 全部文件（网盘根）',is_dir:1},0);
-  el.appendChild(rootRow);
-  /* 自动展开根节点，让用户直接看到子目录 */
-  const tw=rootRow.querySelector('.tw');
-  if(tw) setTimeout(()=>tw.click(), 80);
-}
-function closeMoveDlg(){ $('#moveDlg').style.display='none'; }
-function mtRow(node, depth){
-  const wrap=document.createElement('div');
-  const row=document.createElement('div'); row.className='mt-row';
-  row.style.paddingLeft=(depth*16)+'px';
-  row.dataset.cid=node.cid;
-  if(moveSel.cid===node.cid) row.classList.add('mt-sel');
-  const tw=document.createElement('span'); tw.className='tw'; tw.textContent=node.is_dir?'▶':'·';
-  const nm=document.createElement('span'); nm.textContent=node.name; nm.title=node.name;
-  if(node.is_dir) nm.className='tname dir';
-  row.appendChild(tw); row.appendChild(nm);
-  let kids=document.createElement('div'); kids.style.display='none';
-  if(node.is_dir){
-    row.onclick=()=>{
-      moveSel={cid:node.cid,name:node.name};
-      $('#moveTargetName').textContent=node.name;
-      $$('#moveTree .mt-row').forEach(r=>r.classList.remove('mt-sel'));
-      row.classList.add('mt-sel');
-    };
-    let built=false;
-    tw.onclick=async e=>{
-      e.stopPropagation();
-      if(!built){
-        built=true; kids.innerHTML='<div class="sub" style="padding:4px 8px">加载中…</div>';
-        try{
-          let ch=[];
-          /* 优先在线拉取（live API），确保根节点等未扫描目录也能看到子文件夹 */
-          try{ const d=await api('/api/live/'+node.cid); ch=d.children||d.items||[]; }catch(_){}
-          if(!ch.length){ try{ const d=await api('/api/tree/'+node.cid); ch=d.children||d.items||[]; }catch(_){} }
-          kids.innerHTML='';
-          /* 转移弹窗只显示文件夹，过滤掉文件 */
-          const dirs=ch.filter(c=>c.is_dir);
-          if(!dirs.length){ kids.innerHTML='<div class="sub" style="padding:4px 8px">无子文件夹</div>'; }
-          else dirs.forEach(c=>kids.appendChild(mtRow(c,depth+1)));
-          /* 搜索过滤状态在新子节点上重放 */
-          applyMoveFilter();
-        }catch(err){
-          kids.innerHTML='<div class="sub" style="padding:4px 8px;color:var(--danger)">'+esc(err.message)+'</div>';
-          built=false;
-        }
-      }
-      const show=kids.style.display==='none';
-      kids.style.display=show?'':'none';
-      tw.textContent=show?'▼':'▶';
-    };
-  }
-  wrap.appendChild(row); wrap.appendChild(kids);
-  return wrap;
-}
-/* 移动弹窗：过滤已加载节点（保留祖先链可见） */
-function applyMoveFilter(){
-  const q=$('#moveSearch').value.trim().toLowerCase();
-  const box=$('#moveTree');
-  const rows=box.querySelectorAll('.mt-row');
-  if(!q){ rows.forEach(r=>r.classList.remove('mv-hide')); return; }
-  rows.forEach(r=>r.classList.add('mv-hide'));
-  rows.forEach(r=>{
-    if(r.textContent.toLowerCase().includes(q)){
-      r.classList.remove('mv-hide');
-      let el=r.parentElement;
-      while(el && el!==box){
-        const prev=el.previousElementSibling;
-        if(prev && prev.classList && prev.classList.contains('mt-row')) prev.classList.remove('mv-hide');
-        el=el.parentElement;
-      }
-    }
+  const sel = await pickDir({
+    title:'批量移动 — 选择目标目录',
+    cid: moveSel.cid, name: moveSel.name,
+    persistKey:'move_target',
+    withFilter:true,
   });
-}
-/* 移动弹窗：搜本地库选目标 */
-async function moveSearchMore(){
-  const q=$('#moveSearch').value.trim();
-  if(q.length<2){ toast('至少 2 个字',true); return; }
-  const out=$('#moveSearchOut');
-  out.innerHTML='<div class="sub" style="padding:4px">搜索中…</div>';
-  try{
-    const d=await api('/api/search?type=dir&q='+encodeURIComponent(q));
-    if(!d.rows.length){ out.innerHTML='<div class="sub" style="padding:4px">本地库无匹配目录</div>'; return; }
-    out.innerHTML=d.rows.slice(0,20).map(r=>`<div class="ms-row" data-action="move-pick" data-cid="${esc(r.cid)}" data-name="${esc(r.name)}">
-        <span>📁</span><span title="${esc(r.name)}">${esc(r.name)}</span>
-        <span class="ms-path" title="${esc(r.path)}">${esc(r.path)}</span></div>`).join('')
-      +(d.rows.length>20?`<div class="sub" style="padding:2px 6px">…共 ${d.rows.length} 条，仅显示前 20 条</div>`:'');
-  }catch(e){ out.innerHTML='<div class="sub" style="padding:4px;color:var(--danger)">'+esc(e.message)+'</div>'; }
-}
-function movePick(el){
-  moveSel={cid:el.dataset.cid,name:el.dataset.name};
-  $('#moveTargetName').textContent=el.dataset.name;
-  $('#moveSearchOut').innerHTML='';
-  const row=document.querySelector(`#moveTree .mt-row[data-cid="${CSS.escape(el.dataset.cid)}"]`);
-  if(row){ $$('#moveTree .mt-row').forEach(r=>r.classList.remove('mt-sel')); row.classList.add('mt-sel'); row.scrollIntoView({block:'nearest'}); }
+  if(!sel) return;
+  moveSel = {cid:sel.cid, name:sel.name};
+  await doMove();
 }
 async function doMove(){
   if(!S.sel.size){ toast('请先勾选要移动的项',true); return; }
@@ -1840,7 +2083,7 @@ async function doMove(){
     const okCids=(r.results||[]).filter(x=>x.ok).map(x=>x.cid);
     removeTreeNodes(okCids);
     refreshTreeNode(moveSel.cid);
-    closeMoveDlg(); clearSel(); S.roots=null; refreshTagNodesIfOpen();
+    clearSel(); S.roots=null; refreshTagNodesIfOpen();
   }catch(e){ toast('移动失败: '+e.message,true); }
 }
 
@@ -1887,6 +2130,20 @@ async function loadMoveHistory(){
     el.innerHTML=html;
   }catch(e){}
 }
+/* AI 分析范围显示：统一带 📂 图标（与 转存/查重 的显示保持一致） */
+function setAiScope(cid, name){
+  cid = cid||''; name = name||cid;
+  $('#aiScopeCid').value = cid;
+  const el=$('#aiScopeDisplay');
+  if(el){
+    el.textContent = cid ? ('📂 '+name) : '点击选择分析范围…';
+    el.title = cid ? name : '点击选择分析范围…';
+  }
+}
+/* 读取显示里的真实目录名（去掉图标，避免把图标写进库） */
+function aiScopeRawName(){
+  return ($('#aiScopeDisplay').textContent||'').replace('📂 ','').trim();
+}
 function initAiScope(){
   /* 恢复上次选择 或 默认选中第一个一级目录（如果有 HiveWeb转存 则优先） */
   if(!S.roots || !S.roots.length) return;
@@ -1895,218 +2152,24 @@ function initAiScope(){
   const savedName = localStorage.getItem('ai_scope_name');
   if(saved){
     // 直接恢复上次的选择（不限于一级目录）
-    $('#aiScopeCid').value = saved;
-    $('#aiScopeDisplay').textContent = savedName || saved;
+    setAiScope(saved, savedName || saved);
     return;
   }
   const preferred = S.roots.find(r=>r.name==='HiveWeb转存') || S.roots[0];
-  $('#aiScopeCid').value = preferred.cid;
-  $('#aiScopeDisplay').textContent = preferred.name;
+  setAiScope(preferred.cid, preferred.name);
 }
-/* AI 分析范围：树形文件夹选择弹窗 */
-function aiScopePick(){
-  const old=document.getElementById('aiScopeDlg'); if(old) old.remove();
-  const bg=document.createElement('div');
-  bg.id='aiScopeDlg'; bg.className='modal-bg'; bg.style.zIndex=70;
-  bg.innerHTML=`<div class="modal" style="max-width:500px">
-    <h3><span>选择分析范围（▶ 展开子目录）</span><span class="close" data-action="ai-scope-close">×</span></h3>
-    <div class="row" style="gap:6px;margin-bottom:6px;align-items:center">
-      <button class="lg-chip on" data-scope-mode="local">💾 本地数据</button>
-      <button class="lg-chip" data-scope-mode="live">🌐 在线浏览</button>
-      <span style="flex:1"></span>
-      <select id="aiScopeSort" style="min-width:120px;font-size:12px">
-        <option value="time_desc">⏰ 时间(最新)</option>
-        <option value="time_asc">⏰ 时间(最早)</option>
-        <option value="name_asc">🔤 名称 A→Z</option>
-        <option value="name_desc">🔤 名称 Z→A</option>
-      </select>
-    </div>
-    <div id="aiScopeTree" style="max-height:420px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:4px"></div>
-    <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
-      <span class="sub">当前：</span><b id="aiScopeCur" style="color:var(--accent)">${esc($('#aiScopeDisplay').textContent||'未选择')}</b>
-      <span style="flex:1"></span>
-      <button data-action="ai-scope-ok" class="pri">确定</button>
-      <button data-action="ai-scope-close">取消</button>
-    </div>
-  </div>`;
-  bg.onclick=e=>{ if(e.target===bg) bg.remove(); };
-  document.body.appendChild(bg);
-
-  let picked={cid:$('#aiScopeCid').value, name:$('#aiScopeDisplay').textContent};
-  let currentMode='live';
-
-  function ascRow(node, depth){
-    const wrap=document.createElement('div'); wrap.className='twrap'; wrap.dataset.cid=node.cid;
-    const row=document.createElement('div'); row.className='mt-row';
-    row.style.paddingLeft=(depth*16)+'px';
-    if(picked.cid===node.cid) row.classList.add('mt-sel');
-    const tw=document.createElement('span'); tw.className='tw'; tw.textContent=node.is_dir?'▶':'·';
-    const nm=document.createElement('span'); nm.textContent=node.name; nm.title=node.name;
-    if(node.is_dir) nm.className='tname dir';
-    // 显示子目录数量
-    const meta=document.createElement('span'); meta.className='sub'; meta.style.cssText='margin-left:6px;font-size:11px';
-    meta.textContent=node.is_dir?(node.child_count!=null?node.child_count+' 项':''):'';
-    row.appendChild(tw); row.appendChild(nm); row.appendChild(meta);
-    let kids=document.createElement('div'); kids.style.display='none';
-    if(node.is_dir){
-      row.style.cursor='pointer';
-      let built=false;
-      // 点击行: 默认展开子目录(双击才算选中)
-      row.onclick=async e=>{
-        e.stopPropagation();
-        // 展开/折叠子目录
-        const isHidden = kids.style.display==='none' || kids.style.display==='';
-        if(isHidden){
-          kids.style.display='block';
-          tw.textContent='▼';
-          expandedSet.add(node.cid);
-          saveExpanded();
-          if(!built){
-            kids.innerHTML='<div class="sub" style="padding:4px 8px">加载中…</div>';
-            const sortVal=$('#aiScopeSort')?.value||'time_desc';
-            let ch=[];
-            if(currentMode==='live'){
-              try{ const d=await api('/api/live/'+node.cid); ch=d.children||d.items||[]; }catch(_){}
-              // 在线模式前端排序
-              if(ch.length){
-                const [key,asc]=sortVal.split('_');
-                ch.sort((a,b)=>{
-                  let va,vb;
-                  if(key==='time'){ va=parseInt(a.cid)||0; vb=parseInt(b.cid)||0; }
-                  else{ va=(a.name||'').toLowerCase(); vb=(b.name||'').toLowerCase(); }
-                  if(va<vb) return asc==='asc'?-1:1;
-                  if(va>vb) return asc==='asc'?1:-1;
-                  return 0;
-                });
-              }
-            }else{
-              try{ const d=await api('/api/tree/'+node.cid+'?sort='+sortVal); ch=d.children||d.items||[]; }catch(_){}
-            }
-            kids.innerHTML='';
-            const dirs=ch.filter(c=>c.is_dir);
-            if(!dirs.length){
-              kids.innerHTML='<div class="sub" style="padding:4px 8px">无子文件夹</div>';
-            } else {
-              built=true;
-              dirs.forEach(c=>kids.appendChild(ascRow(c,depth+1)));
-              // 级联恢复：已在展开记录里的子目录自动展开
-              kids.querySelectorAll(':scope > .twrap').forEach(w=>{
-                if(expandedSet.has(w.dataset.cid)){
-                  const t2=w.querySelector(':scope > .mt-row > .tw');
-                  if(t2 && t2.textContent==='▶') t2.click();
-                }
-              });
-            }
-          }
-        }else{
-          kids.style.display='none';
-          tw.textContent='▶';
-          expandedSet.delete(node.cid);
-          saveExpanded();
-        }
-        // 同时选中
-        picked={cid:node.cid, name:node.name};
-        document.getElementById('aiScopeCur').textContent=node.name;
-        bg.querySelectorAll('.mt-row').forEach(r=>r.classList.remove('mt-sel'));
-        row.classList.add('mt-sel');
-      };
-    }
-    wrap.appendChild(row); wrap.appendChild(kids);
-    return wrap;
-  }
-
-  // 恢复排序选择
-  const savedSort=localStorage.getItem('ai_scope_sort')||'time_desc';
-  const sortEl=$('#aiScopeSort');
-  if(sortEl) sortEl.value=savedSort;
-
-  // 展开状态记忆
-  const expandedSet=new Set();
-  try{
-    const saved=JSON.parse(localStorage.getItem('ai_scope_expanded')||'[]');
-    saved.forEach(cid=>expandedSet.add(cid));
-  }catch(_){}
-
-  function saveExpanded(){
-    try{ localStorage.setItem('ai_scope_expanded',JSON.stringify([...expandedSet])); }catch(_){}
-  }
-
-  function sortItems(items){
-    const sortVal=$('#aiScopeSort')?.value||'time_desc';
-    const [key,asc]=sortVal.split('_');
-    return items.sort((a,b)=>{
-      let va,vb;
-      if(key==='time'){ va=parseInt(a.cid)||0; vb=parseInt(b.cid)||0; }
-      else{ va=(a.name||'').toLowerCase(); vb=(b.name||'').toLowerCase(); }
-      if(va<vb) return asc==='asc'?-1:1;
-      if(va>vb) return asc==='asc'?1:-1;
-      return 0;
-    });
-  }
-
-  async function buildTree(mode){
-    currentMode=mode;
-    const tree=$('#aiScopeTree');
-    tree.innerHTML='<div class="sub" style="padding:8px">加载中…</div>';
-    bg.querySelectorAll('[data-scope-mode]').forEach(b=>b.classList.toggle('on',b.dataset.scopeMode===mode));
-    // 根目录不排序，保持API原始顺序（和目录浏览一致）
-    if(mode==='live'){
-      try{
-        const d=await api('/api/roots');
-        tree.innerHTML='';
-        (d.items||[]).filter(r=>r.is_dir).forEach(r=>tree.appendChild(ascRow({...r,is_dir:1},0)));
-      }catch(e){ tree.innerHTML='<div class="sub" style="padding:8px;color:var(--danger)">加载失败: '+esc(e.message)+'</div>'; }
-    }else{
-      try{ await loadRoots(); }catch(e){}
-      tree.innerHTML='';
-      const roots=S.roots||[];
-      if(!roots.length){ tree.innerHTML='<div class="sub" style="padding:8px">暂无本地数据的根目录</div>'; return; }
-      roots.forEach(r=>tree.appendChild(ascRow({...r,is_dir:1},0)));
-    }
-    // 自动展开之前展开过的目录（递归展开）
-    function restoreExpanded(){
-      let expanded=false;
-      tree.querySelectorAll('.twrap').forEach(w=>{
-        if(expandedSet.has(w.dataset.cid)){
-          const tw=w.querySelector(':scope > .mt-row > .tw');
-          if(tw && tw.textContent==='▶'){
-            tw.click();
-            expanded=true;
-          }
-        }
-      });
-      // 如果有新展开的目录，等子目录加载后再展开
-      if(expanded) setTimeout(restoreExpanded, 300);
-    }
-    requestAnimationFrame(()=>restoreExpanded());
-  }
-
-  bg.querySelectorAll('[data-scope-mode]').forEach(btn=>{
-    btn.onclick=()=>buildTree(btn.dataset.scopeMode);
+/* AI 分析范围：复用公共目录选择器 */
+async function aiScopePick(){
+  const sel = await pickDir({
+    title:'选择分析范围',
+    cid:  $('#aiScopeCid').value,
+    name: aiScopeRawName(),
+    persistKey:'ai_scope',
   });
-  // 排序选择器切换时重新加载
-  if(sortEl){
-    sortEl.addEventListener('change',()=>{
-      localStorage.setItem('ai_scope_sort',sortEl.value);
-      buildTree(currentMode);
-    });
-  }
-
-  buildTree('local');
-
-  /* 确定按钮 */
-  bg.querySelector('[data-action="ai-scope-ok"]').onclick=()=>{
-    if(!picked.cid){ toast('请先选择一个文件夹',true); return; }
-    $('#aiScopeCid').value=picked.cid;
-    $('#aiScopeDisplay').textContent=picked.name;
-    localStorage.setItem('ai_scope_cid', picked.cid);
-    localStorage.setItem('ai_scope_name', picked.name);
-    bg.remove();
-  };
-  bg.querySelectorAll('[data-action="ai-scope-close"]').forEach(el=>el.onclick=()=>bg.remove());
-  document.addEventListener('keydown', function onEsc(e){
-    if(e.key==='Escape'){ bg.remove(); document.removeEventListener('keydown',onEsc,true); }
-  }, true);
+  if(!sel) return;
+  setAiScope(sel.cid, sel.name);
+  localStorage.setItem('ai_scope_cid', sel.cid);
+  localStorage.setItem('ai_scope_name', sel.name);
 }
 async function loadAiConfig(){
   try{
@@ -2145,7 +2208,7 @@ async function aiAnalyze(){
   const cid=$('#aiScopeCid').value;
   if(!cid) return toast('先选择范围目录',true);
   const limit=parseInt($('#aiLimit').value||0);
-  const name=$('#aiScopeDisplay').textContent||cid;
+  const name=aiScopeRawName()||cid;
   try{
     const d=await api('/api/ai/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({scope_cid:cid,scope_name:name,limit})});
@@ -2371,16 +2434,18 @@ async function aiPlanFlow(){
   if(!approved){ toast('还没有「已通过」的建议：先审核通过再生成移动计划',true); return; }
   const bg=document.createElement('div');
   bg.className='modal-bg'; bg.dataset.app='confirm'; bg.style.zIndex=70;
+  /* 默认父目录：优先「网盘管理系统」，否则第一个一级目录，再否则网盘根(cid=0) */
+  const defRoot = (S.roots||[]).find(r=>r.name==='网盘管理系统') || (S.roots||[])[0];
+  const defCid  = defRoot ? defRoot.cid : '0';
+  const defName = defRoot ? defRoot.name : '网盘根目录';
   bg.innerHTML=`<div class="modal" style="max-width:520px">
     <h3><span>生成移动计划</span><span class="close" data-c="n">×</span></h3>
     <div class="ac-msg">将移动全部「已通过」的建议：<b>${approved}</b> 项。
 每个分类会在所选父目录下自动建目录（已存在则复用），然后分批移动，本地树自动同步。</div>
     <div class="row">
       <span class="sub" style="flex:none">父目录</span>
-      <select id="aiParentSel" style="flex:1;min-width:220px">
-        ${(S.roots||[]).map(i=>`<option value="${i.cid}"${i.name==='网盘管理系统'?' selected':''}>${esc(i.name)}</option>`).join('')}
-        <option value="0">📁 网盘根目录</option>
-      </select>
+      <button id="aiParentBtn" type="button" style="flex:1;min-width:220px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(defName)}">📂 ${esc(defName)}</button>
+      <input type="hidden" id="aiParentSel" value="${esc(defCid)}">
     </div>
     <div class="row" style="margin-top:8px">
       <span class="sub" style="flex:none">或新建</span>
@@ -2396,10 +2461,26 @@ async function aiPlanFlow(){
     else if(e.target===bg) done(false);
   });
   document.body.appendChild(bg);
+  /* 父目录：按钮 + 公共目录选择器（「网盘根目录」= cid 0） */
+  bg.querySelector('#aiParentBtn').onclick = async ()=>{
+    const pInp=bg.querySelector('#aiParentSel'), pBtn=bg.querySelector('#aiParentBtn');
+    const sel = await pickDir({
+      title:'选择父目录',
+      cid: pInp.value,
+      name: (pBtn.textContent||'').replace('📂 ','').trim(),
+      persistKey:'ai_parent',
+      allowAll:true, allCid:'0', allLabel:'网盘根目录',
+    });
+    if(!sel) return;
+    pInp.value = sel.cid;
+    pBtn.textContent = '📂 ' + sel.name;
+    pBtn.title = sel.name;
+  };
   bg.querySelector('[data-c="y"]').onclick=async()=>{
     // 注意:必须在 done(true) 移除弹窗 DOM 之前读取全部表单值
     const parentName=$('#aiParentNew').value.trim();
     let parentCid=$('#aiParentSel').value;
+    const parentLabel=($('#aiParentBtn').textContent||'').replace('📂 ','').trim();
     const discSep = false; // 不再单独归类原盘
     if(parentName){
       try{
@@ -2416,7 +2497,7 @@ async function aiPlanFlow(){
       d.plan.forEach(p=>{ byTo[p.to_name]=(byTo[p.to_name]||0)+1; });
       const perCat=Object.keys(byTo).sort().map(k=>`${k}：${byTo[k]} 项`).join('\n');
       const ok=await appConfirm({title:'确认执行移动',
-        message:`计划：${d.plan.length} 项 → ${d.mkdirs.length} 个分类目录\n${perCat}\n\n父目录：${parentName||parentCid}\n移动可反悔（再移回即可），本地树自动同步。`,
+        message:`计划：${d.plan.length} 项 → ${d.mkdirs.length} 个分类目录\n${perCat}\n\n父目录：${parentName||parentLabel||parentCid}\n移动可反悔（再移回即可），本地树自动同步。`,
         okText:'执行移动'});
       if(!ok) return;
       await runAiMoves(d.plan);
@@ -2858,14 +2939,17 @@ const ACTIONS={
   'bk-del': el=>delBackup(el.dataset.name),
   'tree-mode': el=>switchTreeMode(el.dataset.treeMode),
   'search-go': ()=>doSearch(),
+  'search-root-pick': ()=>searchRootPick(),
   'hist-run': el=>runHistory(+el.dataset.idx),
   'hist-clear': ()=>clearHistory(),
   'scan-start': ()=>startScan(),
+  'scan-root-pick': ()=>scanRootPick(),
   'job-stop': el=>stopJob(+el.dataset.id),
   'job-pause': el=>pauseJob(+el.dataset.id),
   'job-resume': el=>resumeJob(+el.dataset.id),
   'job-del': el=>deleteJob(+el.dataset.id),
   'sched-add': ()=>addSched(),
+  'sch-root-pick': ()=>schRootPick(),
   'sched-del': el=>delSched(+el.dataset.id),
   'parse-text': ()=>parseText(),
   'rm-item': el=>{ S.parsed.splice(+el.dataset.idx,1); renderParsed(); },
@@ -2873,6 +2957,7 @@ const ACTIONS={
   'tf-target-pick': ()=>tfTargetPick(),
   'task-toggle': el=>toggleTask(+el.dataset.id),
   'dup-refresh': ()=>loadDupPage(),
+  'dup-scope-pick': ()=>dupScopePick(),
   'dup-toggle': el=>{
     const card=el.closest('.dcard'); const gid=el.dataset.gid;
     card.classList.toggle('open');
@@ -2883,6 +2968,7 @@ const ACTIONS={
   'dup-del-one': el=>dupDelOne(el.dataset.cid, el.dataset.pid, el.dataset.name),
   'dup-del-sel': el=>dupDelSel(el.dataset.gid),
   'd-scan': ()=>{ if(S.detailNode) scanOne(S.detailNode.cid, S.detailNode.name); },
+  'd-rescan': ()=>{ if(S.detailNode) scanOne(S.detailNode.cid, S.detailNode.name, true); },
   'd-mkdir': ()=>{ if(S.detailNode) mkdirIn(S.detailNode.cid, S.detailNode.name); },
   'd-live': ()=>{ if(S.detailNode){ $('#detail').style.display='none'; buildTree(S.detailNode.cid,'',true); } },
   'd-dl': el=>dlOne(el.dataset.cid, el.nextElementSibling&&el.nextElementSibling.classList.contains('dlout')?el.nextElementSibling:$('#dlOut')),
@@ -2895,10 +2981,6 @@ const ACTIONS={
   'search-move-one': el=>searchMoveOne(el.dataset.cid, el.dataset.pid, el.dataset.name),
   'dl-one': el=>dlOne(el.dataset.cid, el.nextElementSibling),
   'move-open': ()=>openMoveDlg(),
-  'move-close': ()=>closeMoveDlg(),
-  'move-do': ()=>doMove(),
-  'move-search-more': ()=>moveSearchMore(),
-  'move-pick': el=>movePick(el),
   'bb-toggle': ()=>{
     const p=$('#bbPop');
     p.style.display=p.style.display==='block'?'none':'block';
@@ -2937,8 +3019,7 @@ const ACTIONS={
   },
   'ai-rerun': el=>{
     const scope=el.dataset.scope, name=el.dataset.name||scope;
-    $('#aiScopeCid').value=scope;
-    $('#aiScopeDisplay').textContent=name;
+    setAiScope(scope, name);
     toast('已设置范围为「'+name+'」，点击「开始分析」重跑');
   },
   'ai-view-batch': async el=>{
@@ -3111,8 +3192,6 @@ document.addEventListener('keydown', e=>{
     if(tg.style.display==='flex'){ tg.style.display='none'; return; }
     const cm=document.getElementById('cookieModal');
     if(cm && cm.style.display!=='none'){ cm.remove(); return; }
-    const md=$('#moveDlg');
-    if(md.style.display==='flex'){ md.style.display='none'; return; }
     const bp=$('#bbPop');
     if(bp.style.display==='block'){ bp.style.display='none'; return; }
     const dt=$('#detail');
@@ -3276,7 +3355,6 @@ let sizeTimer=null;
   $('#'+id).addEventListener('input', ()=>{ clearTimeout(sizeTimer); sizeTimer=setTimeout(doSearch,600); });
 });
 $('#tfFile').addEventListener('change', e=>parseFile(e.target.files[0]));
-$('#moveSearch').addEventListener('input', applyMoveFilter);
 
 initTree().catch(e=>{ $('#treeBox').innerHTML='<div class="empty">根目录加载失败: '+esc(e.message)+'</div>'; });
 

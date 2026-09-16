@@ -639,6 +639,29 @@ def tree(cid: str, sort: str = "time_desc"):
     }
 
 
+@app.get("/api/node/{cid}")
+def node_info(cid: str):
+    """单个节点的本地库信息（目录选择器用来判断"是否已入库/已扫描"）"""
+    con = _db()
+    try:
+        row = con.execute(
+            "SELECT cid,pid,root,name,is_dir FROM tree_nodes WHERE cid=?", (cid,)).fetchone()
+        st = con.execute(
+            "SELECT status,scanned_at FROM scan_state WHERE cid=?", (cid,)).fetchone()
+        kids = con.execute(
+            "SELECT count(*) c FROM tree_nodes WHERE pid=? AND cid<>pid", (cid,)).fetchone()["c"]
+    finally:
+        con.close()
+    if not row:
+        return {"exists": False, "cid": cid, "name": None, "is_dir": None,
+                "scan_state": None, "scanned_at": None, "child_count": 0}
+    return {"exists": True, "cid": row["cid"], "name": row["name"],
+            "is_dir": bool(row["is_dir"]), "pid": row["pid"], "root": row["root"],
+            "scan_state": st["status"] if st else None,
+            "scanned_at": st["scanned_at"] if st else None,
+            "child_count": kids}
+
+
 # ---------- 实时浏览(未扫描目录直接看云端) ----------
 @app.get("/api/live/{cid}")
 def live(cid: str, sort: str = "time_desc"):

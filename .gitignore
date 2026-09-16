@@ -1,0 +1,52 @@
+# ==================== 个人数据文件 ====================
+# Cookie 和登录凭据
+cookie115.txt
+
+# 数据库文件
+115_tree.db
+115_tree.db-wal
+115_tree.db-shm
+115_inventory.db
+115_inventory.db-wal
+115_inventory.db-shm
+
+# AI 配置（包含 API Key）
+ai_config.json
+
+# 环境变量配置
+.env
+
+# 备份目录
+backups/
+
+# ==================== Python 缓存 ====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ==================== 虚拟环境 ====================
+venv/
+.venv/
+env/
+ENV/
+.env.local
+
+# ==================== IDE 和编辑器 ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==================== 日志文件 ====================
+*.log
+logs/
+
+# ==================== 其他 ====================
+*.tmp
+*.temp
+*.bak
+*.backup

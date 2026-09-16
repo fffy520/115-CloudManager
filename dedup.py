@@ -6,6 +6,7 @@ import sqlite3
 from collections import defaultdict
 
 import config
+import db
 
 CUT = re.compile(
     r'[._\s-]*(?:2160p|1080[pi]|720p|4320p|WEB[-_. ]?DL|WEBRip|WEB|Blu-?ray|BluRay|BDrip|'
@@ -31,8 +32,7 @@ def fmt_size(b: int) -> str:
 def get_duplicates(scope_root: str = None):
     """返回 {groups: [{key, names:[{cid,pid,path,name,fc,sz}], exact, sizes}], meta}
     scope_root: 限定某个根目录内查重; None=全部一级目录互查"""
-    con = sqlite3.connect(config.TREE_DB)
-    con.row_factory = sqlite3.Row
+    con = db.get_conn()
     # 一级目录(pid=某root 且自身是目录) 按范围取; 附带父目录名用于展示完整路径
     if scope_root:
         roots = con.execute(
@@ -86,8 +86,7 @@ def get_duplicates(scope_root: str = None):
 
 def get_stats():
     """总览统计"""
-    con = sqlite3.connect(config.TREE_DB)
-    con.row_factory = sqlite3.Row
+    con = db.get_conn()
     meta = {}
     meta["nodes"] = con.execute("SELECT count(*) c FROM tree_nodes").fetchone()["c"]
     meta["files"] = con.execute("SELECT count(*) c FROM tree_nodes WHERE is_dir=0").fetchone()["c"]

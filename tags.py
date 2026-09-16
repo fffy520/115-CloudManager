@@ -13,6 +13,7 @@ import threading
 from datetime import datetime
 
 import config
+import db
 import logbus
 
 CATEGORIES = ["类型", "分辨率", "字幕", "国家", "画质", "音频", "状态", "来源", "自定义"]
@@ -91,51 +92,17 @@ SEED_TAGS = [
 # AI 建议的载体(format) -> 落标用的标签名; 空/未知不落
 FORMAT_TAG_NAMES = {"原盘": "原盘", "remux": "Remux", "web-dl": "Web-DL", "hdtv": "HDTV"}
 
-_init_lock = threading.Lock()
 _CHUNK = 500
 
 
 def get_conn() -> sqlite3.Connection:
-    con = sqlite3.connect(config.TREE_DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    return con
+    """兼容旧接口, 委托给 db.get_conn()"""
+    return db.get_conn()
 
 
 def ensure_tables():
-    with _init_lock:
-        con = get_conn()
-        try:
-            con.executescript("""
-                CREATE TABLE IF NOT EXISTS tags (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name       TEXT NOT NULL UNIQUE,
-                    category   TEXT DEFAULT '自定义',
-                    color      TEXT DEFAULT '',
-                    created_at TEXT);
-                CREATE TABLE IF NOT EXISTS node_tags (
-                    cid        TEXT NOT NULL,
-                    tag_id     INTEGER NOT NULL,
-                    source     TEXT DEFAULT 'manual',
-                    created_at TEXT,
-                    PRIMARY KEY (cid, tag_id));
-                CREATE INDEX IF NOT EXISTS idx_node_tags_tag ON node_tags(tag_id);
-                CREATE TABLE IF NOT EXISTS tag_rules (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tag_name     TEXT NOT NULL,
-                    dir_pattern  TEXT NOT NULL DEFAULT '',
-                    file_pattern TEXT DEFAULT '',
-                    on_files     INTEGER NOT NULL DEFAULT 1,
-                    enabled      INTEGER NOT NULL DEFAULT 1,
-                    note         TEXT DEFAULT '',
-                    sort         INTEGER DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT NOT NULL DEFAULT '');
-            """)
-            con.commit()
-        finally:
-            con.close()
+    """表已在 db.py 中创建, 此函数保留兼容接口"""
+    pass
 
 
 def ensure_seed_tags():

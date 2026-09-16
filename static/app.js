@@ -29,10 +29,17 @@ function fmt(b){ if(!b) return '0 B';
   if(b>=1024**2) return (b/1024**2).toFixed(1)+' MB';
   return Math.round(b/1024)+' KB'; }
 async function api(path, opt={}){
-  const r = await fetch(path, opt);
-  const d = await r.json().catch(()=>({error:'响应解析失败'}));
-  if(!r.ok) throw new Error(d.error||d.detail||('HTTP '+r.status));
-  return d; }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000); // 30秒超时
+  try {
+    const r = await fetch(path, {...opt, signal: controller.signal});
+    const d = await r.json().catch(()=>({error:'响应解析失败'}));
+    if(!r.ok) throw new Error(d.error||d.detail||('HTTP '+r.status));
+    return d;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 function statusBadge(s){
   const m={done:['已完成','b-done'],running:['运行中','b-run'],queued:['排队中','b-que'],
     error:['失败','b-err'],stopped:['已停止','b-stop'],success:['成功','b-done'],
@@ -2275,6 +2282,8 @@ async function loadSuggestions(){
     const conf=parseFloat($('#aiConf').value||0);
     aiData=await api(`/api/ai/suggestions?status=${encodeURIComponent(status)}&category=${encodeURIComponent(cat)}&min_conf=${conf}&limit=500`);
   }catch(e){ $('#aiList').innerHTML='<div class="empty">加载失败: '+esc(e.message)+'</div>'; return; }
+  // 清空选择状态(避免跨筛选条件误操作)
+  aiSel.clear();
   renderAiSum(); renderAiList(); fillAiCatOptions();
 }
 function showBatchPopup(bid, rows){

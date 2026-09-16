@@ -17,6 +17,7 @@ import traceback
 from datetime import datetime
 
 import config
+import db
 import logbus
 import scanner
 
@@ -135,6 +136,7 @@ COUNTRY_RULES = [
 ]
 
 _init_lock = threading.Lock()
+_init_done = False
 
 SERIES_RE = re.compile(r"\bS\d{1,2}(?:\s?E\d{1,3})?\b", re.I)
 CONCERT_RE = re.compile(r"演唱会|音乐会|concert|unplugged|音乐节|live\s*at|演唱会(?:现场)?", re.I)
@@ -192,64 +194,8 @@ def config_ready() -> bool:
 
 
 def get_conn() -> sqlite3.Connection:
-    con = sqlite3.connect(config.TREE_DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    with _init_lock:
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS ai_batches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scope_cid TEXT NOT NULL, scope_name TEXT DEFAULT '',
-            status TEXT DEFAULT 'queued',   -- queued/running/done/stopped/error
-            limit_n INTEGER DEFAULT 0,      -- 试跑条数(0=全量)
-            total INTEGER DEFAULT 0, processed INTEGER DEFAULT 0,
-            n_rule INTEGER DEFAULT 0, n_calls INTEGER DEFAULT 0,
-            tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0,
-            err TEXT, created_at TEXT, started_at TEXT, finished_at TEXT);
-        CREATE TABLE IF NOT EXISTS ai_suggestions (
-            cid TEXT PRIMARY KEY,
-            name TEXT DEFAULT '', pid TEXT DEFAULT '',
-            hint TEXT DEFAULT '',
-            category TEXT DEFAULT '', suggested_name TEXT DEFAULT '',
-            confidence REAL DEFAULT 0, reason TEXT DEFAULT '',
-            source TEXT DEFAULT 'ai',        -- rule/ai
-            status TEXT DEFAULT 'pending',   -- pending/approved/rejected/moved
-            batch_id INTEGER,
-            updated_at TEXT);
-        CREATE INDEX IF NOT EXISTS idx_ai_sug_status ON ai_suggestions(status, category);
-        """)
-        # 旧库迁移: ai_suggestions 补新列
-        cols = [r[1] for r in con.execute("PRAGMA table_info(ai_suggestions)")]
-        if "format" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN format TEXT DEFAULT ''")
-        if "attribute" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN attribute TEXT DEFAULT ''")
-        if "resolution" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN resolution TEXT DEFAULT ''")
-        if "subtitle" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN subtitle TEXT DEFAULT ''")
-        if "country" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN country TEXT DEFAULT ''")
-        if "quality" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN quality TEXT DEFAULT ''")
-        if "audio" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN audio TEXT DEFAULT ''")
-        if "target_path" not in cols:
-            con.execute("ALTER TABLE ai_suggestions ADD COLUMN target_path TEXT DEFAULT ''")
-        con.commit()
-        # 移动历史表
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS ai_move_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id INTEGER,
-            cid TEXT, name TEXT DEFAULT '',
-            from_path TEXT DEFAULT '', to_path TEXT DEFAULT '',
-            status TEXT DEFAULT 'ok',    -- ok/failed
-            err TEXT DEFAULT '',
-            moved_at TEXT);
-        CREATE INDEX IF NOT EXISTS idx_move_history_batch ON ai_move_history(batch_id);
-        """)
-    return con
+    """兼容旧接口, 委托给 db.get_conn()"""
+    return db.get_conn()
 
 
 def _kv_get(con, key):
@@ -712,7 +658,7 @@ class AiManager:
         con.commit()
         con.close()
         self.worker = None
-        self.stop_event = threading.Event()
+        self._stop_events: dict[int, threading.Event] = {}  # 按 batch_id 记录停止事件
         # 单进程直跑, 见 scanner.ScanManager.__init__ 说明: 必须无条件启动分析线程
         self._start_worker()
 
@@ -734,7 +680,8 @@ class AiManager:
         try:
             row = con.execute("SELECT status FROM ai_batches WHERE id=?", (batch_id,)).fetchone()
             if row and row["status"] in ("queued", "running"):
-                self.stop_event.set()
+                if batch_id in self._stop_events:
+                    self._stop_events[batch_id].set()
                 return True
             return False
         finally:
@@ -754,7 +701,8 @@ class AiManager:
                 if not job:
                     time.sleep(3)
                     continue
-                self.stop_event.clear()
+                # 为当前批次创建 stop_event
+                self._stop_events[job["id"]] = threading.Event()
                 self._run_batch(job["id"])
             except Exception:
                 traceback.print_exc()
@@ -843,11 +791,12 @@ class AiManager:
             n_failed_blocks = 0
 
             for i in range(0, len(items), get_batch_size()):
-                if self.stop_event.is_set():
+                if self._stop_events.get(batch_id, threading.Event()).is_set():
                     con.execute("UPDATE ai_batches SET status='stopped', finished_at=? WHERE id=?",
                                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), batch_id))
                     con.commit()
                     logbus.pub("AI", f"批次 #{batch_id} 已停止(已处理 {i}/{len(items)})", lv="warn")
+                    self._stop_events.pop(batch_id, None)
                     return
 
                 chunk = items[i:i + get_batch_size()]
@@ -1005,4 +954,6 @@ class AiManager:
             logbus.pub("AI", f"批次 #{batch_id} 异常终止: {str(e)[:120]}", lv="error")
             traceback.print_exc()
         finally:
+            # 清理该批次的 stop_event
+            self._stop_events.pop(batch_id, None)
             con.close()

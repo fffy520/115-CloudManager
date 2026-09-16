@@ -236,8 +236,9 @@ def move_files(fids: list, pid: str, to_cid: str, cookie: str) -> dict:
     """移动文件/目录到目标目录(已实测验证)
     fids: [cid or fid], to_cid: 目标目录 cid
     115 接口参数: pid=目标目录cid, fid[i]=要移动的项 (pid 是目标! 不是源父目录)
-    单次上限约 1000 个, 超出自动分批"""
-    moved, errors = 0, []
+    单次上限约 1000 个, 超出自动分批
+    返回: {ok: bool, success: [fid,...], failed: [{fid, error},...], count: int}"""
+    success, failed = [], []
     for i in range(0, len(fids), 500):
         batch = fids[i:i + 500]
         data = {"pid": to_cid}
@@ -245,12 +246,16 @@ def move_files(fids: list, pid: str, to_cid: str, cookie: str) -> dict:
             data[f"fid[{j}]"] = fid
         res = post_json("https://webapi.115.com/files/move", data, cookie)
         if res.get("state"):
-            moved += len(batch)
+            success.extend(batch)
         else:
-            errors.append(res.get("error", "移动失败"))
-    if moved:
-        return {"ok": True, "count": moved, "errors": errors}
-    return {"ok": False, "error": "; ".join(errors[:3]) or "移动失败"}
+            err = res.get("error", "移动失败")
+            failed.extend([{"fid": fid, "error": err} for fid in batch])
+    return {
+        "ok": len(failed) == 0,
+        "success": success,
+        "failed": failed,
+        "count": len(success),
+    }
 
 
 def get_download_url(pick_code: str, cookie: str) -> dict:

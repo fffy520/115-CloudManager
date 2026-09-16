@@ -15,51 +15,17 @@ from datetime import datetime
 
 import api115
 import config
+import db
 import logbus
 
 INTERVAL = (config.SCAN_INTERVAL_MIN, config.SCAN_INTERVAL_MAX)
 RETRY_WAIT = config.SCAN_RETRY_WAIT
 MAX_AUTO_RETRY = config.SCAN_RETRY_MAX
 
-_init_lock = threading.Lock()
-
 
 def get_conn() -> sqlite3.Connection:
-    con = sqlite3.connect(config.TREE_DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    with _init_lock:
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS tree_nodes (
-            cid TEXT PRIMARY KEY, pid TEXT NOT NULL, root TEXT NOT NULL,
-            name TEXT NOT NULL, is_dir INTEGER NOT NULL, size INTEGER DEFAULT 0);
-        CREATE INDEX IF NOT EXISTS idx_nodes_pid ON tree_nodes(pid);
-        CREATE INDEX IF NOT EXISTS idx_nodes_root ON tree_nodes(root);
-        CREATE TABLE IF NOT EXISTS scan_state (
-            cid TEXT PRIMARY KEY, status TEXT DEFAULT 'pending',
-            err TEXT, scanned_at TEXT, node_count INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS scan_jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            target_cid TEXT NOT NULL, target_name TEXT NOT NULL,
-            status TEXT DEFAULT 'queued',   -- queued/running/retry_wait/done/error/stopped
-            rescan INTEGER DEFAULT 0,       -- 1=强制重扫(清除旧记录)
-            priority INTEGER DEFAULT 0,    -- 0=普通, 1=高优先级(转存后自动触发)
-            total INTEGER DEFAULT 0, done_count INTEGER DEFAULT 0,
-            err TEXT, created_at TEXT, started_at TEXT, finished_at TEXT);
-        CREATE TABLE IF NOT EXISTS schedules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            target_cid TEXT NOT NULL, target_name TEXT NOT NULL,
-            hour INTEGER NOT NULL, minute INTEGER NOT NULL,
-            enabled INTEGER DEFAULT 1, last_run TEXT, created_at TEXT);
-        """)
-        # 旧库迁移: scan_jobs 补 retry_count 列
-        cols = [r[1] for r in con.execute("PRAGMA table_info(scan_jobs)")]
-        if "retry_count" not in cols:
-            con.execute("ALTER TABLE scan_jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
-        if "priority" not in cols:
-            con.execute("ALTER TABLE scan_jobs ADD COLUMN priority INTEGER DEFAULT 0")
-        con.commit()
-    return con
+    """兼容旧接口, 委托给 db.get_conn()"""
+    return db.get_conn()
 
 
 class ScanManager:
@@ -73,7 +39,7 @@ class ScanManager:
         con.commit()
         con.close()
         self.worker = None
-        self.stop_event = threading.Event()
+        self._stop_events: dict[int, threading.Event] = {}  # 按 job_id 记录停止事件
         # 始终启动扫描线程。
         # 本项目启动方式均为单进程直跑(server.py 用 uvicorn.run(app, ...) 且未开 reload;
         # run.py 亦显式 reload=False)。uvicorn 的 reload/workers 分支要求以 import string
@@ -108,7 +74,8 @@ class ScanManager:
         row = con.execute("SELECT status FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
         con.close()
         if row and row["status"] in ("running", "retry_wait", "queued"):
-            self.stop_event.set()
+            if job_id in self._stop_events:
+                self._stop_events[job_id].set()
             return True
         return False
 
@@ -124,12 +91,21 @@ class ScanManager:
                 # 优先取高优先级任务，同优先级按ID顺序
                 job = con.execute(
                     "SELECT * FROM scan_jobs WHERE status='queued' ORDER BY priority DESC, id LIMIT 1").fetchone()
-                # paused 任务不自动恢复, 需用户手动点"继续"(scan_resume 端点重新入队)
-                con.close()
                 if not job:
+                    # 无排队任务时，检查是否有被抢占暂停的任务需要恢复
+                    paused = con.execute(
+                        "SELECT id FROM scan_jobs WHERE status='paused' AND rescan=0 ORDER BY id LIMIT 1"
+                    ).fetchone()
+                    if paused:
+                        con.execute("UPDATE scan_jobs SET status='queued' WHERE id=?", (paused["id"],))
+                        con.commit()
+                        logbus.pub("扫描", f"自动恢复被抢占的任务 #{paused['id']}", lv="ok")
+                    con.close()
                     time.sleep(3)
                     continue
-                self.stop_event.clear()
+                con.close()
+                # 为当前任务创建 stop_event
+                self._stop_events[job["id"]] = threading.Event()
                 self._run_job(job["id"])
             except Exception:
                 traceback.print_exc()
@@ -171,7 +147,7 @@ class ScanManager:
             total_done = 0
             skipped = 0
             while stack:
-                if self.stop_event.is_set():
+                if self._stop_events.get(job_id, threading.Event()).is_set():
                     # 检查当前状态：如果是用户手动暂停（paused），保持paused状态
                     current_status = con.execute("SELECT status FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
                     if current_status and current_status["status"] == "paused":
@@ -245,6 +221,8 @@ class ScanManager:
             traceback.print_exc()
             self._auto_retry(con, job_id, str(e))
         finally:
+            # 清理该任务的 stop_event
+            self._stop_events.pop(job_id, None)
             con.close()
 
     def _auto_retry(self, con, job_id: int, err_msg: str):
@@ -269,7 +247,7 @@ class ScanManager:
                        f" -> {RETRY_WAIT}s 后自动探测 (第 {retries}/{MAX_AUTO_RETRY} 轮)", lv="error")
             # 可中断等待(用户请求停止时立即结束等待)
             for _ in range(RETRY_WAIT):
-                if self.stop_event.is_set():
+                if self._stop_events.get(job_id, threading.Event()).is_set():
                     con.execute("UPDATE scan_jobs SET status='stopped', finished_at=? WHERE id=?",
                                 (now(), job_id))
                     con.commit()

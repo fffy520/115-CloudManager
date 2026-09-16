@@ -52,7 +52,8 @@ def install_dependencies():
 
 def check_cookie():
     """检查 Cookie 配置"""
-    cookie_file = "cookie115.txt"
+    import config
+    cookie_file = config.COOKIE_FILE
     if not os.path.exists(cookie_file):
         print(f"警告: 未找到 {cookie_file}")
         print("请先配置 Cookie，否则无法连接 115 网盘")
@@ -112,8 +113,9 @@ def start_server():
     print()
     print("启动中...")
     print()
-    print(f"访问地址: http://127.0.0.1:8765")
-    print(f"局域网访问: http://{get_local_ip()}:8765")
+    import config
+    print(f"访问地址: http://127.0.0.1:{config.PORT}")
+    print(f"局域网访问: http://{get_local_ip()}:{config.PORT}")
     print()
     print("按 Ctrl+C 停止服务")
     print("=" * 50)
@@ -127,7 +129,8 @@ def start_server():
         
         def open_browser():
             time.sleep(3)
-            webbrowser.open("http://127.0.0.1:8765")
+            import config
+            webbrowser.open(f"http://127.0.0.1:{config.PORT}")
         
         browser_thread = threading.Thread(target=open_browser, daemon=True)
         browser_thread.start()
@@ -137,10 +140,11 @@ def start_server():
     # 启动服务
     try:
         import uvicorn
+        import config
         uvicorn.run(
             "server:app",
-            host="0.0.0.0",
-            port=8765,
+            host=config.HOST,
+            port=config.PORT,
             reload=False,
             log_level="info"
         )

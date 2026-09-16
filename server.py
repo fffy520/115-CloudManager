@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import ai_worker
 import api115
 import config
+import db
 import dedup
 import logbus
 import scanner
@@ -158,11 +159,23 @@ def _list_backups() -> list:
 
 def _restore_backup(name: str) -> dict:
     """从备份恢复。会先备份当前 DB 再覆盖。"""
+    # 校验文件名白名单(防路径穿越)
+    import re
+    if not re.match(r'^115_tree-[\w.-]+\.db$', name):
+        raise HTTPException(400, "非法文件名")
     src = os.path.join(BACKUP_DIR, name)
+    # 确保文件路径在 BACKUP_DIR 内
+    if os.path.realpath(src) != os.path.realpath(os.path.join(BACKUP_DIR, os.path.basename(src))):
+        raise HTTPException(400, "非法文件路径")
     if not os.path.isfile(src):
         raise HTTPException(404, "备份不存在")
     # 先备份当前（保护性恢复）
     safety = _backup_now(f"pre-restore-{name[:30]}")
+    # 停止三个 worker(避免并发写入)
+    logbus.pub("系统", "恢复前停止后台任务...", lv="warn")
+    scan_mgr = scanner.get_manager()
+    transfer_mgr = transfer_worker.TransferManager()
+    ai_mgr = ai_worker.AiManager()
     # 断开所有 SQLite 连接（WAL checkpoint）
     con = _db()
     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -224,36 +237,14 @@ except Exception as e:
 
 # ---------- 通用 ----------
 def _db():
-    con = sqlite3.connect(TREE_DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    return con
+    """兼容旧接口, 委托给 db.get_conn()"""
+    return db.get_conn()
 
 
 # ---------- 启动时建表(若不存在) ----------
 def _ensure_tables():
+    """表已在 db.py 中创建, 此函数只做种子数据初始化"""
     con = _db()
-    con.executescript("""
-        CREATE TABLE IF NOT EXISTS search_history (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            q       TEXT    NOT NULL,
-            scope   TEXT    DEFAULT '',
-            n       INTEGER DEFAULT 0,
-            ts      INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_search_ts   ON search_history(ts DESC);
-        CREATE INDEX IF NOT EXISTS idx_search_qkey ON search_history(q, scope);
-        CREATE TABLE IF NOT EXISTS stats_history (
-            date       TEXT PRIMARY KEY,   -- YYYY-MM-DD
-            dirs       INTEGER DEFAULT 0,
-            files      INTEGER DEFAULT 0,
-            total_size INTEGER DEFAULT 0,
-            scanned    INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS cookie_meta (
-            key   TEXT PRIMARY KEY,
-            value TEXT
-        );
-    """)
     # 标签系统表 + 种子词表
     tags.ensure_tables()
     tags.ensure_seed_tags()
@@ -365,13 +356,12 @@ class CookieReq(BaseModel):
 
 @app.get("/api/cookie")
 def cookie_get():
-    """获取当前 Cookie 状态与内容(本地工具, 全文返回无安全风险)"""
+    """获取当前 Cookie 状态(不含明文内容, 防止局域网泄露)"""
     try:
         cookie = api115.load_cookie()
         chk = api115.check_cookie(cookie)
         return {
             "cookie_ok": chk["ok"], "cookie_error": chk.get("error", ""),
-            "cookie_content": cookie,
             "cookie_length": len(cookie),
             "has_uid": "UID" in cookie or "uid" in cookie,
             "has_session": "USERSESSIONID" in cookie or "usersessionid" in cookie,
@@ -379,7 +369,7 @@ def cookie_get():
     except Exception as e:
         return {
             "cookie_ok": False, "cookie_error": str(e)[:200],
-            "cookie_content": "", "cookie_length": 0,
+            "cookie_length": 0,
             "has_uid": False, "has_session": False,
         }
 
@@ -1638,17 +1628,15 @@ def fs_delete_batch(req: DeleteBatchReq):
 
 
 def _remove_subtree(con, cid: str):
-    # 候选范围与下面两条 DELETE 完全一致: 该 root 下全部目录 + 节点本身
-    subs = [r["cid"] for r in con.execute(
-        "SELECT cid FROM tree_nodes WHERE root=? AND is_dir=1", (cid,))]
-    subs.append(cid)
-    con.execute("DELETE FROM tree_nodes WHERE root=? AND is_dir=1", (cid,))
-    con.execute("DELETE FROM tree_nodes WHERE cid=?", (cid,))
-    con.execute("DELETE FROM scan_state WHERE cid=?", (cid,))
-    # 标签关联同步清理(按 500 分块防超 SQLite 变量上限)
+    """删除 cid 及其全部后代(含文件), 并清理关联的 scan_state 和 node_tags"""
+    # 收集 cid 及其所有后代(包括文件和目录)
+    subs = _collect_descendants(con, cid)
+    # 按 500 分块防超 SQLite 变量上限
     for i in range(0, len(subs), 500):
         chunk = subs[i:i + 500]
         qm = ",".join("?" * len(chunk))
+        con.execute(f"DELETE FROM tree_nodes WHERE cid IN ({qm})", chunk)
+        con.execute(f"DELETE FROM scan_state WHERE cid IN ({qm})", chunk)
         con.execute(f"DELETE FROM node_tags WHERE cid IN ({qm})", chunk)
 
 
@@ -1695,15 +1683,13 @@ def fs_move(req: MoveReq):
         results = []
         for pid, fids in by_pid.items():
             res = api115.move_files(fids, pid, req.to_cid, cookie)
-            for fid in fids:
-                if res["ok"]:
-                    results.append({"cid": fid, "ok": True})
-                else:
-                    results.append({"cid": fid, "ok": False, "error": res.get("error", "移动失败")})
-            # 本地树同步(只处理云端成功的)
-            for fid in fids:
-                if not any(r["cid"] == fid and r["ok"] for r in results):
-                    continue
+            # 记录逐 fid 结果(只看当前分组, 不跨组累积)
+            for fid in res.get("success", []):
+                results.append({"cid": fid, "ok": True})
+            for item in res.get("failed", []):
+                results.append({"cid": item["fid"], "ok": False, "error": item["error"]})
+            # 本地树同步(只处理当前分组确认成功的 fid)
+            for fid in res.get("success", []):
                 _move_subtree_local(con, fid, req.to_cid)
             con.commit()
             if len(by_pid) > 1:

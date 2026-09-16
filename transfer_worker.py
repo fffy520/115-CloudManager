@@ -15,6 +15,7 @@ from datetime import datetime
 
 import api115
 import config
+import db
 import logbus
 import scanner
 
@@ -25,33 +26,10 @@ DELAY = 4.0  # 每条之间的基础间隔(秒)
 SLUG_RE = re.compile(r"(?:115(?:cdn)?|anxia)\.com/s/([a-z0-9]+)", re.I)
 PW_RE = re.compile(r"password=([^&#\s]+)", re.I)
 
-_init_lock = threading.Lock()
-
 
 def get_conn() -> sqlite3.Connection:
-    con = sqlite3.connect(TREE_DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    with _init_lock:
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS transfer_tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL, target_cid TEXT NOT NULL, target_name TEXT NOT NULL,
-            status TEXT DEFAULT 'queued',  -- queued/running/done/stopped/error
-            total INTEGER DEFAULT 0, processed INTEGER DEFAULT 0,
-            n_success INTEGER DEFAULT 0, n_repeat INTEGER DEFAULT 0,
-            n_expired INTEGER DEFAULT 0, n_failed INTEGER DEFAULT 0,
-            err TEXT, created_at TEXT, finished_at TEXT);
-        CREATE TABLE IF NOT EXISTS transfer_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER NOT NULL, share_code TEXT NOT NULL,
-            receive_code TEXT DEFAULT '', title TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending', message TEXT DEFAULT '',
-            processed_at TEXT);
-        CREATE INDEX IF NOT EXISTS idx_titems_task ON transfer_items(task_id);
-        """)
-        con.commit()
-    return con
+    """兼容旧接口, 委托给 db.get_conn()"""
+    return db.get_conn()
 
 
 # ---------------- 链接解析 ----------------
@@ -173,7 +151,7 @@ class TransferManager:
         con.commit()
         con.close()
         self.worker = None
-        self.stop_event = threading.Event()
+        self._stop_events: dict[int, threading.Event] = {}  # 按 task_id 记录停止事件
         # 单进程直跑, 见 scanner.ScanManager.__init__ 说明: 必须无条件启动转存线程
         self._start_worker()
 
@@ -198,7 +176,8 @@ class TransferManager:
         row = con.execute("SELECT status FROM transfer_tasks WHERE id=?", (task_id,)).fetchone()
         con.close()
         if row and row["status"] == "running":
-            self.stop_event.set()
+            if task_id in self._stop_events:
+                self._stop_events[task_id].set()
             return True
         return False
 
@@ -216,7 +195,8 @@ class TransferManager:
                 if not task:
                     time.sleep(3)
                     continue
-                self.stop_event.clear()
+                # 为当前任务创建 stop_event
+                self._stop_events[task["id"]] = threading.Event()
                 self._run_task(task["id"])
             except Exception:
                 traceback.print_exc()
@@ -240,11 +220,12 @@ class TransferManager:
             logbus.pub("转存", f"任务 #{task_id}「{t['name']}」开始: 待处理 {len(rows)} 条"
                        f" → 「{t['target_name']}」", lv="ok")
             for idx, r in enumerate(rows, 1):
-                if self.stop_event.is_set():
+                if self._stop_events.get(task_id, threading.Event()).is_set():
                     con.execute("UPDATE transfer_tasks SET status='stopped', finished_at=? WHERE id=?",
                                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), task_id))
                     con.commit()
                     logbus.pub("转存", f"任务 #{task_id} 已停止(已处理 {idx-1}/{len(rows)})", lv="warn")
+                    self._stop_events.pop(task_id, None)
                     con.close()
                     return
                 status, msg, snap_items = self._transfer_one(r["share_code"], r["receive_code"], target_cid, cookie)
@@ -300,6 +281,8 @@ class TransferManager:
             logbus.pub("转存", f"任务 #{task_id} 异常终止: {str(e)[:120]}", lv="error")
             traceback.print_exc()
         finally:
+            # 清理该任务的 stop_event
+            self._stop_events.pop(task_id, None)
             con.close()
 
     def _transfer_one(self, share_code: str, receive_code: str, target_cid: str, cookie: str):

@@ -28,6 +28,19 @@ function fmt(b){ if(!b) return '0 B';
   if(b>=1024**3) return (b/1024**3).toFixed(2)+' GB';
   if(b>=1024**2) return (b/1024**2).toFixed(1)+' MB';
   return Math.round(b/1024)+' KB'; }
+/* 把完整路径裁成「… / 末 keep 段」用于窄列显示。
+   铁律：title 一律用完整路径，否则会出现「显示不全、悬停也看不全」。 */
+function shortPath(p, keep=3){
+  const segs=String(p||'').split(' / ').filter(Boolean);
+  return segs.length>keep ? '… / '+segs.slice(-keep).join(' / ') : segs.join(' / ');
+}
+/* 拆出叶子名与父级路径：父级弱化显示且可被省略号截断，叶子加粗且不参与截断 */
+function splitPath(p){
+  const segs=String(p||'').split(' / ').filter(Boolean);
+  const leaf=segs.length?segs[segs.length-1]:'';
+  const parents=segs.slice(0,-1);
+  return {leaf, parentsTxt:(parents.length>2?'… / ':'')+parents.slice(-2).join(' / ')};
+}
 async function api(path, opt={}){
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000); // 30秒超时
@@ -446,6 +459,7 @@ function renderDashActive(d){
         <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,var(--accent),var(--ok));transition:width 1s"></div>
       </div>
       <div style="font-size:11.5px" class="sub">已运行 ${fmtElapsed(aj.elapsed_sec)} · 速度 ${rateTxt}${etaTxt?' · '+etaTxt:''}</div>
+      ${aj.current_path?`<div style="font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" class="sub" title="${esc(aj.current_path)}">📂 ${esc(shortPath(aj.current_path,3))}</div>`:''}
     </div>`;
   }
   // 中部：🆕 新发现目录流（实时滚动感）
@@ -461,24 +475,23 @@ function renderDashActive(d){
       <div style="max-height:210px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:var(--card)">
         ${scans.map((s,i)=>{
           const nm=s.name||'?';
-          /* 后端已按 pid 链还原真实路径（末 3 段）；早先只拼 root/叶子，
-             会把中间层级吞掉，让人误以为该目录就挂在扫描根下面 */
+          /* full = 后端按 pid 链还原的完整路径，直接进 title(悬停必须看得到全)；
+             可见文本才裁段，并用 flex 保护叶子名不被省略号吃掉 */
           const full=s.path||[s.root_name,nm].filter(Boolean).join(' / ');
-          const segs=full.split(' / ');
-          const leaf=segs.length?segs.pop():nm;
-          const parents=segs.join(' / ');
+          const {leaf,parentsTxt}=splitPath(full);
           const nodes=s.node_count||0;
           const szTxt=nodes>0?(nodes+' 项'):'';
           const t=s.scanned_at?String(s.scanned_at).slice(11,19):'';
           const dn=s.scanned_at?String(s.scanned_at).slice(5,10):'';
           const accent=i<3?'var(--accent)':'var(--txt)';
           return `<div style="display:flex;align-items:center;gap:8px;padding:4px 10px;border-bottom:1px dashed var(--line);font-size:12.5px${i===0?';background:var(--ok)08':''}">
-            <span class="sub" style="width:38px;flex:none;text-align:right;font-family:ui-monospace,monospace;font-size:11px">${esc(t)}</span>
-            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${accent}" title="${esc(full)}">
-              ${parents?`<span class="sub" style="font-size:11px">${esc(parents)} / </span>`:''}<b>${esc(leaf)}</b>
+            <span class="sub" style="width:56px;flex:none;text-align:right;font-family:ui-monospace,monospace;font-size:11px">${esc(t)}</span>
+            <span style="flex:1;min-width:0;display:flex;overflow:hidden;color:${accent}" title="${esc(full)}">
+              ${parentsTxt?`<span class="sub" style="font-size:11px;flex:1 100 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(parentsTxt)} / </span>`:''}
+              <b style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(leaf)}</b>
             </span>
             <span class="sub" style="flex:none;font-size:11px">${esc(szTxt)}</span>
-            <span class="sub" style="flex:none;width:30px;text-align:right;font-size:11px">${esc(dn)}</span>
+            <span class="sub" style="flex:none;width:40px;text-align:right;font-size:11px">${esc(dn)}</span>
           </div>`;
         }).join('')}
       </div>
@@ -1405,11 +1418,12 @@ async function refreshJobs(){
       ?`${j.done_count}/${j.total||'?'} · 第 ${j.retry_count||0}/3 轮`
       :`${j.done_count}/${j.total||'?'}`;
     tr.querySelector('.j-start').textContent=j.started_at||'—';
-    /* 运行中的任务显示「当前扫到哪个子目录」——扫大目录时唯一能看出进度位置的地方 */
+    /* 运行中的任务显示「当前扫到哪个子目录」——扫大目录时唯一能看出进度位置的地方。
+       可见文本裁剪，title 保留完整路径 */
     const cur=tr.querySelector('.j-cur');
     if(cur){
       const cp=(j.status==='running'||j.status==='retry_wait')?(j.current_path||''):'';
-      cur.textContent=cp?('📂 '+cp):'';
+      cur.textContent=cp?('📂 '+shortPath(cp,3)):'';
       cur.title=cp;
     }
     let act='';
@@ -1431,8 +1445,9 @@ async function refreshJobs(){
   const run=d.jobs.find(j=>j.status==='running');
   $('#scanHint').textContent=run
     ?`运行中: ${run.target_name.slice(0,30)} (${run.done_count}/${run.total})`
-      +(run.current_path?` · 当前: ${run.current_path}`:'')
+      +(run.current_path?` · 当前: ${shortPath(run.current_path,3)}`:'')
     :'当前无运行任务';
+  $('#scanHint').title=(run&&run.current_path)?run.current_path:'';
 }
 async function stopJob(id){
   try{ await api('/api/scan/stop/'+id,{method:'POST'}); toast('已请求停止'); }catch(e){ toast(e.message,true); }

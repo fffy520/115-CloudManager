@@ -236,6 +236,22 @@ def full_path(con, cid, cache=None, sep=" / ", max_depth=60, keep=None) -> str:
     return sep.join(parts)
 
 
+def short_path(path: str, keep: int = 3, sep: str = " / ") -> str:
+    """把已经算好的完整路径裁成「… / 末keep段」，用于窄列 / 日志行等空间受限处。
+
+    与 full_path(..., keep=) 的区别: 这里只做字符串处理，不再查库。
+
+    约定: 后端一律传完整路径，由调用方决定怎么裁。这样 title / 悬停提示里
+    永远是完整路径，不会出现「显示不全、悬停也看不全」的情况。
+    """
+    if not path:
+        return ""
+    parts = [p for p in path.split(sep) if p]
+    if len(parts) > keep:
+        return "…" + sep + sep.join(parts[-keep:])
+    return sep.join(parts)
+
+
 def kv_get(key: str) -> str | None:
     """读取 KV 配置"""
     con = get_conn()

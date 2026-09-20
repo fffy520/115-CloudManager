@@ -208,7 +208,7 @@ class ScanManager:
                     if skipped == 1 or skipped % 200 == 0:
                         logbus.pub("扫描", f"#{job_id} 断点续扫: 已跳过 {skipped} 个已扫目录…")
                     # 断点跳过阶段同样要刷新「当前目录」，否则界面会长时间停在旧位置上
-                    cur_path = db.full_path(con, dir_cid, keep=3) or dir_cid
+                    cur_path = db.full_path(con, dir_cid) or dir_cid
                     con.execute("UPDATE scan_jobs SET done_count=?, total=?,"
                                 " current_cid=?, current_path=? WHERE id=?",
                                 (total_done, total_done + len(stack),
@@ -227,15 +227,16 @@ class ScanManager:
                     (dir_cid, "done", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), len(items)))
                 total_done += 1
                 # 记录「当前正在扫的目录」的完整路径，界面据此显示真实位置。
-                # keep=3: 只留末 3 段(… / 音乐合集 / VA - CPO / 专辑)，避免深层路径撑爆日志行。
-                cur_path = db.full_path(con, dir_cid, keep=3) or dir_cid
+                # 入库保留完整路径(界面 tooltip 要显示全)，只有日志行才裁成末 3 段避免撑爆。
+                cur_path = db.full_path(con, dir_cid) or dir_cid
+                log_path = db.short_path(cur_path, keep=3)
                 con.execute("UPDATE scan_jobs SET done_count=?, total=?,"
                             " current_cid=?, current_path=? WHERE id=?",
                             (total_done, total_done + len(stack),
                              dir_cid, cur_path, job_id))
                 con.commit()
                 logbus.pub("扫描", f"#{job_id} [{total_done}/{total_done + len(stack)}] "
-                           f"{cur_path} ({len(items)} 项)")
+                           f"{log_path} ({len(items)} 项)")
                 time.sleep(random.uniform(*INTERVAL))
 
             con.execute(

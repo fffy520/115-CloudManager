@@ -523,7 +523,7 @@ def _build_dashboard() -> dict:
             # 同「最近扫描」: 补真实路径，否则只看到叶子名，不知道它在哪一层
             for _r in aj_log:
                 if _r.get("cid"):
-                    _r["path"] = db.full_path(con, _r["cid"], cache=_pcache, keep=3)
+                    _r["path"] = db.full_path(con, _r["cid"], cache=_pcache)  # 传完整路径, 裁剪交给前端
             aj_recent = [dict(r) for r in con.execute(
                 "SELECT id,target_name,status,total,done_count,started_at,finished_at"
                 " FROM scan_jobs WHERE id=?" , (aj["id"],))]
@@ -548,7 +548,7 @@ def _build_dashboard() -> dict:
         # 补真实路径: 只给 root_name/name 会拼出「我的音乐/专辑名」这种假两级路径，
         # 中间层级会被整个吞掉，让人误以为该目录就在扫描根下面。这里按 pid 链还原。
         for _r in recent_scans:
-            _r["path"] = (db.full_path(con, _r["cid"], cache=_pcache, keep=3)
+            _r["path"] = (db.full_path(con, _r["cid"], cache=_pcache)  # 传完整路径, 裁剪交给前端
                           or " / ".join(x for x in (_r.get("root_name"), _r.get("name")) if x))
     finally:
         con.close()

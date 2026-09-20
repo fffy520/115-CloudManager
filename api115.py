@@ -131,11 +131,26 @@ def list_children(cid: str, cookie: str, offset: int = 0, limit: int = 1000,
             "size": it.get("s", 0) or 0,
             "pick_code": it.get("pc", "") or "",
         })
+    # 修复: 115 接口偶尔对某些目录名返回 n="???"，但同请求的 path 数组里有正确名字
+    path = data.get("path", []) if isinstance(data, dict) else []
+    if path:
+        name_map = {str(p.get("cid", "")): p.get("name", "") for p in path}
+    else:
+        name_map = {}
+
+    for item in items:
+        # 如果 name 是三个问号或空，就用 path 里的正确名字替换
+        if item["name"] in ("?", "???", "") or not item["name"].strip():
+            corrected = name_map.get(item["cid"], "")
+            if corrected:
+                item["name"] = corrected
+
     return {
         "items": items,
         "count": data.get("count", len(items)) if isinstance(data, dict) else len(items),
         "offset": offset,
         "limit": limit,
+        "path": path,
     }
 
 
@@ -143,14 +158,27 @@ def list_children_paged(cid: str, cookie: str, sort_by: str = "file_time", asc: 
     """分页拉取 cid 下全部子项
     注意: 115 的 count 字段返回的是本页条数而非总数, 不能用它判断是否拉完;
     用「页不满」+「首页 cid 重复(超范围 offset 会回退返回最后一页)」双条件终止,
-    并按 cid 去重防止重叠页产生重复"""
+    并按 cid 去重防止重叠页产生重复。
+    修正: 用 path 数组纠正接口返回 n="???" 的目录名"""
     out, offset = [], 0
     seen_first, seen_cids = set(), set()
+    # path_name_map 跨页累积：用每一页的 path 补充
+    path_name_map = {}
     while True:
         r = list_children(cid, cookie, offset=offset, limit=1000, sort_by=sort_by, asc=asc)
         items = r["items"]
         if not items:
             break
+        # 累积 path 信息（同一 cid 的名字以最新页为准）
+        for p in (r.get("path") or []):
+            if p.get("cid") and p.get("name"):
+                path_name_map[str(p["cid"])] = p["name"]
+        # 用 path 纠正 ??? 名字
+        for it in items:
+            if it["name"] in ("?", "???", "") or not it["name"].strip():
+                corrected = path_name_map.get(it["cid"], "")
+                if corrected:
+                    it["name"] = corrected
         if items[0]["cid"] in seen_first:
             break  # offset 超出范围时 115 会回退返回最后一页
         seen_first.add(items[0]["cid"])

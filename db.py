@@ -33,6 +33,7 @@ def _init_tables(con: sqlite3.Connection):
             rescan INTEGER DEFAULT 0,
             priority INTEGER DEFAULT 0,
             total INTEGER DEFAULT 0, done_count INTEGER DEFAULT 0,
+            current_cid TEXT DEFAULT '', current_path TEXT DEFAULT '',
             err TEXT, created_at TEXT, started_at TEXT, finished_at TEXT);
         CREATE TABLE IF NOT EXISTS schedules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +144,11 @@ def _init_tables(con: sqlite3.Connection):
         con.execute("ALTER TABLE scan_jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
     if "priority" not in cols:
         con.execute("ALTER TABLE scan_jobs ADD COLUMN priority INTEGER DEFAULT 0")
+    # 当前正在扫描的目录(供扫描管理页展示真实位置)
+    if "current_cid" not in cols:
+        con.execute("ALTER TABLE scan_jobs ADD COLUMN current_cid TEXT DEFAULT ''")
+    if "current_path" not in cols:
+        con.execute("ALTER TABLE scan_jobs ADD COLUMN current_path TEXT DEFAULT ''")
     # 旧库迁移: ai_suggestions 补列
     cols = [r[1] for r in con.execute("PRAGMA table_info(ai_suggestions)")]
     for col, typ in [
@@ -157,6 +163,10 @@ def _init_tables(con: sqlite3.Connection):
     ]:
         if col not in cols:
             con.execute(f"ALTER TABLE ai_suggestions ADD COLUMN {col} {typ}")
+    # 旧库迁移: tags 补 sort_order 列(标签拖拽排序)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(tags)")]
+    if "sort_order" not in cols:
+        con.execute("ALTER TABLE tags ADD COLUMN sort_order INTEGER DEFAULT 0")
     con.commit()
 
 
@@ -186,6 +196,44 @@ def transaction():
         raise
     finally:
         con.close()
+
+
+def full_path(con, cid, cache=None, sep=" / ", max_depth=60, keep=None) -> str:
+    """沿 pid 链向上重建节点的完整路径。
+
+    背景: tree_nodes 只存了 (cid, pid, name)，而界面多处直接拿叶子 name 去拼扫描根，
+    导致「我的音乐/专辑名」这种只有两级的假路径 —— 中间层被吞掉。
+    这里统一按 pid 链还原真实路径，例如:
+        我的音乐 / 音乐合集 / VA - CPO Collection 665CD / [999 530-2] J.C Bach
+
+    根节点判定: pid == cid (扫描目标自身)，作为路径起点。
+
+    cache: 可选的 {cid: Row} 复用字典。批量调用(如仪表盘 30 条)时传同一个 dict，
+           把 N+1 次查询压到「每个节点只查一次」。
+    keep:  只保留最后 N 段，超出部分用 "…" 前缀，用于日志行/窄列等空间受限处。
+    """
+    parts, seen, node = [], set(), str(cid)
+    while node and node not in seen:
+        seen.add(node)
+        row = cache.get(node) if isinstance(cache, dict) else None
+        if row is None:
+            row = con.execute(
+                "SELECT name, pid FROM tree_nodes WHERE cid=?", (node,)).fetchone()
+            if row is None:
+                break
+            if isinstance(cache, dict):
+                cache[node] = row
+        parts.append(row["name"])
+        pid = row["pid"]
+        if pid == node or len(parts) >= max_depth:   # 到根 / 防御性深度上限
+            break
+        node = pid
+    parts.reverse()
+    if not parts:
+        return ""
+    if keep and len(parts) > keep:
+        return "…" + sep + sep.join(parts[-keep:])
+    return sep.join(parts)
 
 
 def kv_get(key: str) -> str | None:

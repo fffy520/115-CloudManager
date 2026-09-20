@@ -85,6 +85,25 @@ class ScanManager:
         self.worker.start()
 
     def _loop(self):
+        # 启动时先认领「上一个进程留下的孤儿任务」。
+        # 进程被重启/杀掉后，status 会永久停在 running(或 retry_wait)：
+        # _loop 只挑 queued，界面又只在 error/stopped/paused 时给「继续」按钮，
+        # 结果就是任务看起来永远在跑、实际早就死了。这里统一退回 queued 让它续扫
+        # （已扫过的目录靠 scan_state 断点跳过，不会重复请求 115）。
+        try:
+            con = get_conn()
+            orphans = con.execute(
+                "SELECT id FROM scan_jobs WHERE status IN ('running','retry_wait')").fetchall()
+            if orphans:
+                con.execute("UPDATE scan_jobs SET status='queued', current_path='',"
+                            " current_cid='' WHERE status IN ('running','retry_wait')")
+                con.commit()
+                logbus.pub("扫描", f"检测到 {len(orphans)} 个上次未完成的任务, 已重新排队续扫",
+                           lv="warn")
+            con.close()
+        except Exception:
+            traceback.print_exc()
+
         while True:
             try:
                 con = get_conn()
@@ -188,8 +207,12 @@ class ScanManager:
                     skipped += 1
                     if skipped == 1 or skipped % 200 == 0:
                         logbus.pub("扫描", f"#{job_id} 断点续扫: 已跳过 {skipped} 个已扫目录…")
-                    con.execute("UPDATE scan_jobs SET done_count=?, total=? WHERE id=?",
-                                (total_done, total_done + len(stack), job_id))
+                    # 断点跳过阶段同样要刷新「当前目录」，否则界面会长时间停在旧位置上
+                    cur_path = db.full_path(con, dir_cid, keep=3) or dir_cid
+                    con.execute("UPDATE scan_jobs SET done_count=?, total=?,"
+                                " current_cid=?, current_path=? WHERE id=?",
+                                (total_done, total_done + len(stack),
+                                 dir_cid, cur_path, job_id))
                     con.commit()
                     continue
                 items = api115.list_children_paged(dir_cid, cookie)
@@ -203,12 +226,16 @@ class ScanManager:
                     "INSERT OR REPLACE INTO scan_state(cid,status,scanned_at,node_count) VALUES(?,?,?,?)",
                     (dir_cid, "done", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), len(items)))
                 total_done += 1
-                con.execute("UPDATE scan_jobs SET done_count=?, total=? WHERE id=?",
-                            (total_done, total_done + len(stack), job_id))
+                # 记录「当前正在扫的目录」的完整路径，界面据此显示真实位置。
+                # keep=3: 只留末 3 段(… / 音乐合集 / VA - CPO / 专辑)，避免深层路径撑爆日志行。
+                cur_path = db.full_path(con, dir_cid, keep=3) or dir_cid
+                con.execute("UPDATE scan_jobs SET done_count=?, total=?,"
+                            " current_cid=?, current_path=? WHERE id=?",
+                            (total_done, total_done + len(stack),
+                             dir_cid, cur_path, job_id))
                 con.commit()
-                rname = con.execute("SELECT name FROM tree_nodes WHERE cid=?", (dir_cid,)).fetchone()
                 logbus.pub("扫描", f"#{job_id} [{total_done}/{total_done + len(stack)}] "
-                           f"{rname['name'] if rname else dir_cid} ({len(items)} 项)")
+                           f"{cur_path} ({len(items)} 项)")
                 time.sleep(random.uniform(*INTERVAL))
 
             con.execute(

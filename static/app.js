@@ -418,6 +418,85 @@ async function loadDash(){
   renderDashDup(d.dup);
   renderDashTransfer(d);
   renderDashJobs(d);
+  renderDashActive(d);
+}
+function fmtElapsed(sec){
+  sec = Math.max(0, parseInt(sec)||0);
+  if(sec < 60) return sec + ' 秒';
+  if(sec < 3600) return Math.floor(sec/60) + ' 分 ' + (sec%60) + ' 秒';
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60);
+  return h + ' 时 ' + m + ' 分';
+}
+function renderDashActive(d){
+  const el=$('#dashJobs');
+  // 顶部：当前活跃任务进度（仅在有 running 任务时显示）
+  let activeHtml='';
+  const aj=d.active_job;
+  if(aj){
+    const pct=aj.total>0?Math.min(100,Math.round(aj.done_count/aj.total*100)):0;
+    const rateTxt=aj.rate_per_sec>0?(aj.rate_per_sec>=1?(aj.rate_per_sec.toFixed(2)+' 个/秒'):(Math.round(1/aj.rate_per_sec)+' 秒/个')):'计算中…';
+    const etaTxt=(aj.rate_per_sec>0 && aj.total>aj.done_count)?('预计还剩 '+fmtElapsed(Math.round((aj.total-aj.done_count)/aj.rate_per_sec))):'';
+    activeHtml=`<div style="margin-bottom:10px;padding:10px 12px;background:var(--accent)0d;border:1px solid var(--accent)59;border-radius:6px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);animation:dashPulse 1.5s infinite"></span>
+        <b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(aj.target_name)}">${esc(aj.target_name)}</b>
+        <span class="sub">${aj.done_count.toLocaleString()} / ${aj.total.toLocaleString()} · ${pct}%</span>
+      </div>
+      <div style="background:#eef0f3;border-radius:4px;height:10px;overflow:hidden;margin-bottom:5px">
+        <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,var(--accent),var(--ok));transition:width 1s"></div>
+      </div>
+      <div style="font-size:11.5px" class="sub">已运行 ${fmtElapsed(aj.elapsed_sec)} · 速度 ${rateTxt}${etaTxt?' · '+etaTxt:''}</div>
+    </div>`;
+  }
+  // 中部：🆕 新发现目录流（实时滚动感）
+  const scans=d.recent_scans||[];
+  let scansHtml='';
+  if(scans.length){
+    scansHtml=`<div style="margin-bottom:10px">
+      <div class="sub" style="font-size:11.5px;margin-bottom:4px;display:flex;align-items:center">
+        🆕 新发现目录
+        <span style="flex:1"></span>
+        <span>最近 ${scans.length} 条</span>
+      </div>
+      <div style="max-height:210px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:var(--card)">
+        ${scans.map((s,i)=>{
+          const nm=s.name||'?';
+          /* 后端已按 pid 链还原真实路径（末 3 段）；早先只拼 root/叶子，
+             会把中间层级吞掉，让人误以为该目录就挂在扫描根下面 */
+          const full=s.path||[s.root_name,nm].filter(Boolean).join(' / ');
+          const segs=full.split(' / ');
+          const leaf=segs.length?segs.pop():nm;
+          const parents=segs.join(' / ');
+          const nodes=s.node_count||0;
+          const szTxt=nodes>0?(nodes+' 项'):'';
+          const t=s.scanned_at?String(s.scanned_at).slice(11,19):'';
+          const dn=s.scanned_at?String(s.scanned_at).slice(5,10):'';
+          const accent=i<3?'var(--accent)':'var(--txt)';
+          return `<div style="display:flex;align-items:center;gap:8px;padding:4px 10px;border-bottom:1px dashed var(--line);font-size:12.5px${i===0?';background:var(--ok)08':''}">
+            <span class="sub" style="width:38px;flex:none;text-align:right;font-family:ui-monospace,monospace;font-size:11px">${esc(t)}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${accent}" title="${esc(full)}">
+              ${parents?`<span class="sub" style="font-size:11px">${esc(parents)} / </span>`:''}<b>${esc(leaf)}</b>
+            </span>
+            <span class="sub" style="flex:none;font-size:11px">${esc(szTxt)}</span>
+            <span class="sub" style="flex:none;width:30px;text-align:right;font-size:11px">${esc(dn)}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+  // 底部：原「近 7 天 + 最近任务」保留
+  const daily=d.scan_daily||[];
+  const dailyHtml=daily.length
+    ? '<div style="margin-bottom:8px;font-size:12px" class="sub">近 7 天扫描：'+
+      daily.map(x=>`${x.d.slice(5)} ${x.n}个`).join(' · ')+'</div>'
+    : '<div class="sub" style="font-size:12px;margin-bottom:8px">近 7 天无扫描记录</div>';
+  const jobs=(d.recent_jobs||[]).map(j=>`
+    <div style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:12.5px">
+      ${statusBadge(j.status)}
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.target_name)}">${esc(j.target_name)}</span>
+      <span class="sub" style="flex:none">${j.done_count}/${j.total||'?'}</span>
+    </div>`).join('');
+  el.innerHTML=activeHtml+scansHtml+dailyHtml+(jobs||'<div class="sub" style="font-size:12px">暂无任务</div>');
 }
 function renderTrend(trend){
   const el=$('#dashTrend');
@@ -1313,7 +1392,8 @@ async function refreshJobs(){
     if(!tr){
       tr=document.createElement('tr'); tr.dataset.jid=key;
       tr.innerHTML=`<td>${j.id}</td><td class="j-name"></td><td class="j-status"></td>
-        <td><div class="row" style="flex-wrap:nowrap"><div class="progress"><div></div></div><span class="sub j-prog"></span></div></td>
+        <td><div class="row" style="flex-wrap:nowrap"><div class="progress"><div></div></div><span class="sub j-prog"></span></div>
+        <div class="sub j-cur" style="font-size:11px;margin-top:2px;color:var(--accent)"></div></td>
         <td class="sub j-start"></td><td class="j-act"></td>`;
     }
     const pct=j.total?Math.round(j.done_count/j.total*100):0;
@@ -1325,6 +1405,13 @@ async function refreshJobs(){
       ?`${j.done_count}/${j.total||'?'} · 第 ${j.retry_count||0}/3 轮`
       :`${j.done_count}/${j.total||'?'}`;
     tr.querySelector('.j-start').textContent=j.started_at||'—';
+    /* 运行中的任务显示「当前扫到哪个子目录」——扫大目录时唯一能看出进度位置的地方 */
+    const cur=tr.querySelector('.j-cur');
+    if(cur){
+      const cp=(j.status==='running'||j.status==='retry_wait')?(j.current_path||''):'';
+      cur.textContent=cp?('📂 '+cp):'';
+      cur.title=cp;
+    }
     let act='';
     if(j.status==='running'||j.status==='queued'||j.status==='retry_wait'){
       act=`<button data-action="job-stop" data-id="${j.id}">停止</button>
@@ -1342,7 +1429,10 @@ async function refreshJobs(){
   }
   for(const k in existing) if(!seen.has(k)) existing[k].remove();
   const run=d.jobs.find(j=>j.status==='running');
-  $('#scanHint').textContent=run?`运行中: ${run.target_name.slice(0,30)} (${run.done_count}/${run.total})`:'当前无运行任务';
+  $('#scanHint').textContent=run
+    ?`运行中: ${run.target_name.slice(0,30)} (${run.done_count}/${run.total})`
+      +(run.current_path?` · 当前: ${run.current_path}`:'')
+    :'当前无运行任务';
 }
 async function stopJob(id){
   try{ await api('/api/scan/stop/'+id,{method:'POST'}); toast('已请求停止'); }catch(e){ toast(e.message,true); }

@@ -492,6 +492,64 @@ def _build_dashboard() -> dict:
         recent_jobs = [dict(r) for r in con.execute(
             "SELECT id,target_name,status,total,done_count,started_at,finished_at"
             " FROM scan_jobs ORDER BY id DESC LIMIT 5")]
+
+        # 路径重建共享缓存: 一次仪表盘请求内每个节点只查一次(避免 N+1)
+        _pcache = {}
+
+        # 当前活跃任务（running）的实时详情：含进度、速度、最近完成目录
+        active_job = None
+        aj = con.execute(
+            "SELECT id,target_cid,target_name,status,total,done_count,started_at,created_at,"
+            " current_cid,current_path"
+            " FROM scan_jobs WHERE status='running' ORDER BY id DESC LIMIT 1").fetchone()
+        if aj:
+            elapsed = 0
+            rate = 0
+            if aj["started_at"]:
+                try:
+                    elapsed = max(1, (datetime.now() -
+                                datetime.strptime(aj["started_at"], "%Y-%m-%d %H:%M:%S")).total_seconds())
+                except Exception:
+                    elapsed = 1
+            if aj["done_count"] and elapsed > 0:
+                rate = aj["done_count"] / elapsed  # 个/秒
+            # 该任务最近扫完的 20 个目录
+            aj_log = [dict(r) for r in con.execute(
+                "SELECT ss.cid, ss.scanned_at, ss.node_count, ss.err, tn.name, tn.pid"
+                " FROM scan_state ss LEFT JOIN tree_nodes tn ON tn.cid=ss.cid"
+                " WHERE ss.status='done' AND tn.root=? AND ss.scanned_at IS NOT NULL"
+                " ORDER BY ss.scanned_at DESC LIMIT 20",
+                (aj["target_cid"],))]
+            # 同「最近扫描」: 补真实路径，否则只看到叶子名，不知道它在哪一层
+            for _r in aj_log:
+                if _r.get("cid"):
+                    _r["path"] = db.full_path(con, _r["cid"], cache=_pcache, keep=3)
+            aj_recent = [dict(r) for r in con.execute(
+                "SELECT id,target_name,status,total,done_count,started_at,finished_at"
+                " FROM scan_jobs WHERE id=?" , (aj["id"],))]
+            active_job = {
+                "id": aj["id"], "target_cid": aj["target_cid"],
+                "target_name": aj["target_name"], "status": aj["status"],
+                "total": aj["total"], "done_count": aj["done_count"],
+                "started_at": aj["started_at"], "created_at": aj["created_at"],
+                "current_cid": aj["current_cid"], "current_path": aj["current_path"],
+                "elapsed_sec": int(elapsed), "rate_per_sec": round(rate, 3),
+                "log": aj_log,
+            }
+
+        # 仪表盘「最近扫描」里的「🆕 新发现目录」流：跨所有任务的最近 30 条新扫描条目
+        recent_scans = [dict(r) for r in con.execute("""
+            SELECT ss.cid, ss.scanned_at, ss.node_count,
+                   tn.name, tn.pid, tn.root,
+                   (SELECT t2.name FROM tree_nodes t2 WHERE t2.cid=tn.root) AS root_name
+            FROM scan_state ss JOIN tree_nodes tn ON tn.cid=ss.cid
+            WHERE ss.status='done' AND ss.scanned_at IS NOT NULL
+            ORDER BY ss.scanned_at DESC LIMIT 30""")]
+        # 补真实路径: 只给 root_name/name 会拼出「我的音乐/专辑名」这种假两级路径，
+        # 中间层级会被整个吞掉，让人误以为该目录就在扫描根下面。这里按 pid 链还原。
+        for _r in recent_scans:
+            _r["path"] = (db.full_path(con, _r["cid"], cache=_pcache, keep=3)
+                          or " / ".join(x for x in (_r.get("root_name"), _r.get("name")) if x))
     finally:
         con.close()
 
@@ -541,6 +599,8 @@ def _build_dashboard() -> dict:
         "trend": trend,
         "scan_daily": scan_daily,
         "recent_jobs": recent_jobs,
+        "active_job": active_job,
+        "recent_scans": recent_scans,
         "transfer_db": transfer_db,
         "transfer_script": transfer_script,
         "dup": {"groups": len(dup_groups["groups"]), "exact_groups": exact_groups,
@@ -552,7 +612,7 @@ def _build_dashboard() -> dict:
 @app.get("/api/dashboard")
 def dashboard():
     now = time.time()
-    if _dashboard_cache["data"] is not None and now - _dashboard_cache["ts"] < 60:
+    if _dashboard_cache["data"] is not None and now - _dashboard_cache["ts"] < 10:
         return _dashboard_cache["data"]
     data = _build_dashboard()
     _dashboard_cache["data"] = data

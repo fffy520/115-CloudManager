@@ -66,7 +66,10 @@ const S = {
   },
   tags: {                      // 标签页
     list:null,                 // /api/tags 全部标签(含计数)
-    cur:null,                  // 当前查看清单的标签 id
+    cur:[],                    // 多选:已选标签 id 数组(原为单值, 改为支持组合筛选)
+    op:'and',                  // 组合模式: 'and'(交集) 或 'or'(并集)
+    per_tag:{},                // 当前结果下每个 tag 的命中数 {tag_id: count}, 用于 chip 数字
+    editing:false,             // 编辑模式: true 时显示 ✎ ✕ 按钮
     nodes:null,                // 当前标签的节点清单
     total:0,
   },
@@ -2564,7 +2567,7 @@ let tagCats=['属性','状态','来源','自定义'];
 
 async function loadTagsPage(){
   await loadTagList();
-  if(S.tags.cur) loadTagNodes(S.tags.cur);
+  if(S.tags.cur.length) loadTagNodesBySet();
   else $('#tagNodesCard').style.display='none';
 }
 async function loadTagList(){
@@ -2597,32 +2600,138 @@ function renderTagCloud(){
   const groups={};
   list.forEach(t=>{ (groups[t.category||'自定义']=groups[t.category||'自定义']||[]).push(t); });
   const ordered=tagCats.filter(c=>groups[c]).concat(Object.keys(groups).filter(c=>!tagCats.includes(c)));
-  $('#tagCloud').innerHTML=ordered.map(cat=>{
+  // 多选 + 过滤栏(已选标签展示 + AND/OR 切换 + 清除 + 命中数)
+  const filterBar=(S.tags.cur||[]).length?renderTagFilterBar():'';
+  const tagsHtml=ordered.map(cat=>{
     const chips=groups[cat].map(t=>{
+      const isOn=(S.tags.cur||[]).includes(t.id);
+      const showN = isOn && S.tags.per_tag && (t.id in S.tags.per_tag)
+        ? S.tags.per_tag[t.id]
+        : (t.n||0);
       const dot=t.color?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${esc(t.color)};flex:none"></span>`:'';
-      return `<span class="tagchip ${S.tags.cur===t.id?'on':''}" data-action="tag-open" data-id="${t.id}" title="点击查看打了这个标签的清单">
-        ${dot}<span>${esc(t.name)}</span><b>${t.n||0}</b>
+      return `<span class="tagchip ${isOn?'on':''}" data-action="tag-toggle" data-id="${t.id}" data-cat="${esc(cat)}"
+        title="点击 ${isOn?'移除':'加入'}筛选组合">
+        ${dot}<span>${esc(t.name)}</span><b>${showN}</b>
         <span class="ticon" data-action="tag-rename" data-id="${t.id}" title="重命名">✎</span>
         <span class="ticon" data-action="tag-del" data-id="${t.id}" title="删除标签(关联一并删除)">✕</span>
       </span>`;
     }).join('');
-    return `<div style="margin-bottom:6px"><span class="sub" style="display:inline-block;width:52px;flex:none">${esc(cat)}</span>${chips}</div>`;
+    return `<div class="tagcat-row" data-cat="${esc(cat)}" style="margin-bottom:6px">
+      <span class="sub" style="display:inline-block;width:52px;flex:none">${esc(cat)}</span>${chips}
+    </div>`;
   }).join('');
+  $('#tagCloud').innerHTML = filterBar + tagsHtml;
+  // 编辑模式下绑定拖拽事件
+  if(S.tags.editing) bindTagDragDrop();
 }
-async function loadTagNodes(id){
-  S.tags.cur=id;
-  const t=(S.tags.list||[]).find(x=>x.id===id);
-  $('#tagNodesCard').style.display='block';
-  $('#tagNodesTitle').textContent='「'+(t?t.name:'标签 '+id)+'」清单';
+function renderTagFilterBar(){
+  const cur=S.tags.cur||[];
+  const op=S.tags.op||'and';
+  // 当前组合的总命中数(从 per_tag 任一标签拿都不准, 实际总数在 S.tags.total)
+  const total=S.tags.total||0;
+  // 顶部小说明 + AND/OR 切换 + 清除
+  const opBtns=`<span class="sub" style="font-size:12px">组合:</span>
+    <button data-action="tag-op" data-op="and" style="padding:3px 10px;font-size:12px;${op==='and'?'background:var(--accent);color:#fff;border-color:var(--accent)':''}">同时含 (AND)</button>
+    <button data-action="tag-op" data-op="or"  style="padding:3px 10px;font-size:12px;${op==='or' ?'background:var(--accent);color:#fff;border-color:var(--accent)':''}">任一含 (OR)</button>`;
+  // 已选标签条(可点 x 移除)
+  const tagPills=cur.map(id=>{
+    const t=(S.tags.list||[]).find(x=>x.id===id);
+    if(!t) return '';
+    const subCount = S.tags.per_tag && (id in S.tags.per_tag) ? S.tags.per_tag[id] : '?';
+    const dot=t.color?`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${esc(t.color)}"></span>`:'';
+    return `<span class="tagchip on" style="padding:2px 6px;font-size:12px;cursor:default">
+      ${dot}<span>${esc(t.name)}</span>
+      <span class="sub" style="margin-left:2px">${subCount}</span>
+      <span class="ticon" data-action="tag-toggle" data-id="${t.id}" title="移除" style="cursor:pointer">✕</span>
+    </span>`;
+  }).join('');
+  return `<div style="margin-bottom:12px;padding:10px 12px;background:var(--accent-bg);border:1px solid var(--accent)59;border-radius:8px">
+    <div class="row" style="gap:8px;margin-bottom:6px">
+      ${opBtns}
+      <span style="flex:1"></span>
+      <b style="font-size:13px">${op==='and'?'交集':'并集'}</b>
+      <span class="sub">共 <b style="color:var(--accent)">${total.toLocaleString()}</b> 个结果</span>
+      <button data-action="tag-clear-filter" style="padding:2px 8px;font-size:11px">清除</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${tagPills||'<span class="sub" style="font-size:12px">还没选标签</span>'}</div>
+  </div>`;
+}
+async function loadTagNodesBySet(){
+  const cur=S.tags.cur||[];
+  // 已选 0 个: 保持旧行为(显示提示), 但保留空清单视图
+  const card=$('#tagNodesCard'); card.style.display='none';
+  if(!cur.length) return;
+  card.style.display='block';
+  $('#tagNodesTitle').textContent='标签组合清单';
   $('#tagNodes').innerHTML='<div class="empty sub">加载中…</div>';
   try{
-    const d=await api('/api/tags/'+id+'/nodes?limit=500');
-    S.tags.nodes=d.rows||[]; S.tags.total=d.total||0;
+    const op=S.tags.op||'and';
+    const d=await api('/api/tags/nodes?ids='+cur.join(',')+'&op='+op+'&limit=500');
+    S.tags.nodes=d.rows||[]; S.tags.total=d.total||0; S.tags.per_tag=d.per_tag||{};
     renderTagNodes();
   }catch(e){
     $('#tagNodes').innerHTML='<div class="empty">加载失败: '+esc(e.message)+'</div>';
+    S.tags.total=0; S.tags.nodes=[]; S.tags.per_tag={};
   }
-  renderTagCloud();
+  renderTagCloud();  // 刷新 chip 上的"组合下命中数"
+}
+function toggleTagSelection(id){
+  id=parseInt(id);
+  const cur=S.tags.cur||[];
+  const idx=cur.indexOf(id);
+  if(idx>=0) cur.splice(idx,1); else cur.push(id);
+  S.tags.cur=cur;
+  loadTagNodesBySet();
+}
+/* 拖拽排序: 在编辑模式下启用, 只支持同分类内拖拽 */
+function bindTagDragDrop(){
+  const cloud=$('#tagCloud');
+  if(!cloud) return;
+  let dragEl=null, dragCat=null;
+  cloud.querySelectorAll('.tagchip').forEach(el=>{
+    el.draggable=true;
+    el.addEventListener('dragstart', e=>{
+      if(!S.tags.editing) return;
+      dragEl=el; dragCat=el.dataset.cat||'';
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain', el.dataset.id||'');
+    });
+    el.addEventListener('dragend', ()=>{
+      el.classList.remove('dragging');
+      dragEl=null; dragCat=null;
+      cloud.querySelectorAll('.tagchip.dragging').forEach(x=>x.classList.remove('dragging'));
+    });
+  });
+  // 在每个 chip 上监听 dragover/drop, 判断插入位置
+  cloud.addEventListener('dragover', e=>{
+    if(!dragEl) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect='move';
+    const target=e.target.closest('.tagchip');
+    if(!target || target===dragEl || (target.dataset.cat||'')!==dragCat) return;
+    // 计算插入位置(左/右)
+    const rect=target.getBoundingClientRect();
+    const mid=rect.left+rect.width/2;
+    const before=e.clientX<mid;
+    // 找目标的父容器, 在正确位置插入拖拽元素
+    const container=target.parentNode;
+    if(before) container.insertBefore(dragEl, target);
+    else container.insertBefore(dragEl, target.nextSibling);
+  });
+  cloud.addEventListener('drop', e=>{
+    e.preventDefault();
+    if(!dragEl) return;
+    // 同分类内保存新顺序: 收集该分类下所有 tag id
+    const catRow=cloud.querySelector(`.tagcat-row[data-cat="${CSS.escape(dragCat)}"]`);
+    if(!catRow) return;
+    const newOrder=[...catRow.querySelectorAll('.tagchip[data-cat]')].map(x=>parseInt(x.dataset.id));
+    if(!newOrder.length) return;
+    // 保存到后端
+    api('/api/tags/order',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ids:newOrder})}).catch(e=>toast('排序保存失败: '+e.message,true));
+  });
+  cloud.addEventListener('dragenter', e=>e.preventDefault());
 }
 function renderTagNodes(){
   const rows=S.tags.nodes||[];
@@ -2657,7 +2766,7 @@ function tagSelNone(){
   updateBatchBar();
 }
 function refreshTagNodesIfOpen(){
-  if($('#p-tags').classList.contains('on') && S.tags.cur) loadTagNodes(S.tags.cur);
+  if($('#p-tags').classList.contains('on') && S.tags.cur.length) loadTagNodesBySet();
 }
 
 /* ---------- 打标签弹窗(目录树勾选 / 标签清单 / 详情面板共用) ---------- */
@@ -2757,7 +2866,9 @@ async function tagDelete(id){
   try{
     await api('/api/tags/'+id,{method:'DELETE'});
     toast('已删除标签「'+t.name+'」');
-    if(S.tags.cur===id){ S.tags.cur=null; S.tags.nodes=null; $('#tagNodesCard').style.display='none'; }
+    if(S.tags.cur.includes(id)) S.tags.cur = S.tags.cur.filter(x=>x!==id);
+    S.tags.nodes=null; S.tags.total=0; S.tags.per_tag={};
+    $('#tagNodesCard').style.display = S.tags.cur.length ? 'block' : 'none';
     loadTagList();
   }catch(e){ toast(e.message,true); }
 }
@@ -2772,7 +2883,7 @@ async function tagRename(id){
       body:JSON.stringify({name:nm, category:t.category, color:t.color})});
     toast('已重命名为「'+nm+'」');
     loadTagList();
-    if(S.tags.cur===id) loadTagNodes(id);
+    if(S.tags.cur.includes(id)) loadTagNodesBySet();
   }catch(e){ toast(e.message,true); }
 }
 async function tagCleanup(){
@@ -2791,7 +2902,7 @@ async function tagClearAll(){
     const d=await api('/api/tags/clear-all',{method:'POST'});
     toast('已清零 '+d.removed.toLocaleString()+' 条标签关联');
     loadTagList();
-    if(S.tags.cur) loadTagNodes(S.tags.cur);
+    if(S.tags.cur.length) loadTagNodesBySet();
   }catch(e){ toast(e.message,true); }
 }
 
@@ -3130,7 +3241,38 @@ const ACTIONS={
   'tag-rule-del': el=>tagRuleDelete(+el.dataset.id),
   'tag-rule-enable': el=>tagRuleToggle(+el.dataset.id),
   'tag-deny-save': ()=>tagDenySave(),
-  'tag-open': el=>loadTagNodes(+el.dataset.id),
+  'tag-toggle': el=>toggleTagSelection(+el.dataset.id),
+  'tag-op': el=>{
+    const op=el.dataset.op;
+    if(S.tags.op===op) return;
+    S.tags.op=op;
+    loadTagNodesBySet();
+  },
+  'tag-clear-filter': ()=>{
+    S.tags.cur=[]; S.tags.per_tag={}; S.tags.nodes=null; S.tags.total=0;
+    $('#tagNodesCard').style.display='none';
+    renderTagCloud();
+  },
+  'tag-edit-toggle': el=>{
+    S.tags.editing = !S.tags.editing;
+    el.textContent = S.tags.editing ? '✅ 完成' : '✏️ 编辑';
+    el.style.background = S.tags.editing ? 'var(--accent-bg)' : '';
+    el.style.borderColor = S.tags.editing ? 'var(--accent)' : '';
+    const cloud=$('#tagCloud');
+    cloud.classList.toggle('tags-editing', S.tags.editing);
+    if(S.tags.editing){
+      bindTagDragDrop();
+    }else{
+      // 退出编辑时清除所有 draggable
+      cloud.querySelectorAll('.tagchip[draggable]').forEach(x=>{ x.draggable=false; x.classList.remove('dragging'); });
+      // 保存最终排序(整个 tagCloud 里的顺序)
+      const allIds=[...cloud.querySelectorAll('.tagchip[data-cat]')].map(x=>parseInt(x.dataset.id)).filter(Boolean);
+      if(allIds.length){
+        api('/api/tags/order',{method:'PUT',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ids:allIds})}).catch(e=>toast('排序保存失败: '+e.message,true));
+      }
+    }
+  },
   'tag-del': el=>tagDelete(+el.dataset.id),
   'tag-rename': el=>tagRename(+el.dataset.id),
   'tagnode-open': el=>openInTree(el.dataset.isdir==='1'?el.dataset.cid:(el.dataset.pid||el.dataset.cid)),

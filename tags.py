@@ -156,14 +156,27 @@ def mark_seed_deleted(tag_name: str):
 
 # ---------------- 标签 CRUD ----------------
 def list_tags() -> list:
-    """全部标签 + 已打数量"""
+    """全部标签 + 已打数量, 按自定义排序 → 分类 → 名称"""
     con = get_conn()
     try:
         rows = con.execute("""
             SELECT t.id, t.name, t.category, t.color, count(n.cid) AS n
             FROM tags t LEFT JOIN node_tags n ON n.tag_id=t.id
-            GROUP BY t.id ORDER BY t.category, t.name""").fetchall()
+            GROUP BY t.id ORDER BY t.category, t.sort_order, t.name""").fetchall()
         return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def reorder_tags(tag_ids: list):
+    """保存标签拖拽排序: tag_ids 按用户当前顺序排列, 依次写入 sort_order"""
+    if not tag_ids:
+        return
+    con = get_conn()
+    try:
+        for i, tid in enumerate(tag_ids):
+            con.execute("UPDATE tags SET sort_order=? WHERE id=?", (i, int(tid)))
+        con.commit()
     finally:
         con.close()
 
@@ -339,6 +352,72 @@ def nodes_for_tag(tag_id: int, limit: int = 500):
             WHERE n.tag_id=?
             ORDER BY t.is_dir DESC, t.size DESC LIMIT ?""", (tag_id, int(limit))).fetchall()
         return [dict(r) for r in rows], total
+    finally:
+        con.close()
+
+
+def nodes_for_tags(tag_ids: list, op: str = "and", limit: int = 500):
+    """多标签组合筛选 + 每个标签在当前结果中的命中数
+
+    op='and': 交集——cid 必须同时拥有全部 tag_ids
+    op='or':  并集——cid 拥有 tag_ids 中任一即可
+    返回:
+        rows, total, per_tag_count
+      - rows: 节点清单(同 nodes_for_tag 字段)
+      - total: 组合后的命中总数(不截断的总数)
+      - per_tag_count: {tag_id: 该标签在主结果中的命中数}, 用来在 UI 上展示每个标签的贡献
+    """
+    if not tag_ids:
+        return [], 0, {}
+    op = (op or "and").lower()
+    if op not in ("and", "or"):
+        op = "and"
+    con = get_conn()
+    try:
+        ids = [int(t) for t in tag_ids]
+        ph = ",".join(["?"] * len(ids))
+        ids_params = tuple(ids)  # 仅 ids, 长度 = ph 个
+        # 构造"命中条件"的子查询(共享给 total/detail/per_tag 三处)
+        if op == "and":
+            cond_sql = f"""
+                SELECT n.cid FROM node_tags n
+                JOIN tree_nodes t ON t.cid = n.cid
+                WHERE n.tag_id IN ({ph})
+                GROUP BY n.cid
+                HAVING COUNT(DISTINCT n.tag_id) = ?
+            """
+            cond_params = (*ids_params, len(ids))
+        else:  # or
+            cond_sql = f"""
+                SELECT n.cid FROM node_tags n
+                JOIN tree_nodes t ON t.cid = n.cid
+                WHERE n.tag_id IN ({ph})
+            """
+            cond_params = ids_params
+        # 1) 总数(无截断)
+        total = con.execute(f"SELECT COUNT(*) FROM ({cond_sql})", cond_params).fetchone()[0]
+        # 2) 详情(按目录优先 + 大小降序), 仍用 JOIN 过滤孤儿节点
+        detail_sql = f"""
+            SELECT t.cid, t.pid, t.root, t.name, t.is_dir, t.size
+            FROM tree_nodes t
+            WHERE t.cid IN ({cond_sql})
+            ORDER BY t.is_dir DESC, t.size DESC LIMIT ?
+        """
+        rows = con.execute(detail_sql, (*cond_params, int(limit))).fetchall()
+        # 3) 每个 tag 在主结果中的命中数
+        per_tag_sql = f"""
+            SELECT n.tag_id, COUNT(DISTINCT n.cid)
+            FROM node_tags n
+            WHERE n.tag_id IN ({ph})
+              AND n.cid IN ({cond_sql})
+            GROUP BY n.tag_id
+        """
+        per_tag_rows = con.execute(per_tag_sql, (*ids_params, *cond_params)).fetchall()
+        per_tag = {int(r[0]): int(r[1]) for r in per_tag_rows}
+        # 任何输入标签如果没在结果里出现, 补 0
+        for tid in ids:
+            per_tag.setdefault(tid, 0)
+        return [dict(r) for r in rows], total, per_tag
     finally:
         con.close()
 

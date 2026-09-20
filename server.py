@@ -1279,6 +1279,16 @@ def tags_list():
     return {"items": tags.list_tags(), "categories": tags.CATEGORIES}
 
 
+class TagReorderReq(BaseModel):
+    ids: list  # tag id 数组, 按新顺序排列
+
+
+@app.put("/api/tags/order")
+def tags_reorder(req: TagReorderReq):
+    tags.reorder_tags(req.ids)
+    return {"ok": True}
+
+
 class TagReq(BaseModel):
     name: str = ""
     category: str = "自定义"
@@ -1405,6 +1415,28 @@ def tags_create(req: TagReq):
 def tags_nodes(tag_id: int, limit: int = 500):
     rows, total = tags.nodes_for_tag(tag_id, limit)
     return {"rows": rows, "total": total}
+
+
+@app.get("/api/tags/nodes")
+def tags_nodes_by_set(ids: str, op: str = "and", limit: int = 500):
+    """多标签组合筛选: ?ids=1,5,8&op=and|or&limit=500
+
+    返回:
+      - rows: 命中节点清单
+      - total: 命中总数(不截断)
+      - per_tag: {tag_id: 该 tag 在主结果中的命中数}, 用于 chip 上显示
+    """
+    try:
+        tag_ids = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "ids 参数格式错误, 期望逗号分隔的数字")
+    if not tag_ids:
+        raise HTTPException(400, "ids 不能为空")
+    if len(tag_ids) > 20:
+        raise HTTPException(400, "一次最多选 20 个标签组合")
+    rows, total, per_tag = tags.nodes_for_tags(tag_ids, op, limit)
+    return {"rows": rows, "total": total, "per_tag": per_tag,
+            "op": op, "ids": tag_ids}
 
 
 @app.post("/api/tags/{tag_id}")

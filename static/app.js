@@ -22,7 +22,7 @@ window.addEventListener('unhandledrejection', e=>{
 const $  = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmt(b){ if(!b) return '0 B';
   if(b>=1024**4) return (b/1024**4).toFixed(2)+' TB';
   if(b>=1024**3) return (b/1024**3).toFixed(2)+' GB';
@@ -169,7 +169,9 @@ async function confirmDanger(o){
     danger:true, okText:'确认删除'});
 }
 
-/** 进度弹窗（长任务），返回控制器 {update(text,pct), close(msg), cancel()} */
+/** 进度弹窗（长任务），返回控制器 {update(text,pct), close(msg), cancel(), cancelled}
+ *  关键: 点 X/遮罩 = 请求取消(置 cancelled=true)。调用方的分批循环必须逐批检查该标记
+ *  后停手 —— 旧版只是把弹窗关掉, 批量删除/移动在后台继续跑(假取消, 极危险) */
 function appProgress(title){
   const bg=document.createElement('div');
   bg.className='modal-bg'; bg.dataset.app='progress'; bg.style.zIndex=80;
@@ -180,24 +182,24 @@ function appProgress(title){
   document.body.appendChild(bg);
   const bar=bg.querySelector('.progress>div'), txt=bg.querySelector('.pg-text');
   let closed=false;
-  // 点击X或遮罩关闭
-  bg.addEventListener('click',e=>{
-    const c=e.target.closest('[data-c]');
-    if(c && c.dataset.c==='cancel' && !closed){
-      bg.remove();
-    } else if(e.target===bg && !closed){
-      bg.remove();
-    }
-  });
-  return {
-    update(text,pct){ txt.textContent=text; if(pct!=null) bar.style.width=Math.max(0,Math.min(100,pct))+'%'; },
-    close(msg){ closed=true; txt.textContent=msg||'完成'; bar.style.width='100%';
+  const ctl={
+    cancelled:false,
+    update(text,pct){ if(ctl.cancelled) return; txt.textContent=text; if(pct!=null) bar.style.width=Math.max(0,Math.min(100,pct))+'%'; },
+    close(msg){ if(ctl.cancelled) return; closed=true; txt.textContent=msg||'完成'; bar.style.width='100%';
       // 隐藏关闭按钮，显示完成关闭按钮
       const closeBtn=bg.querySelector('[data-c="cancel"]');
       if(closeBtn) closeBtn.style.display='none';
       const b=document.createElement('button'); b.className='pri'; b.textContent='关闭'; b.style.marginTop='12px';
-      b.onclick=()=>bg.remove(); bg.querySelector('.modal').appendChild(b); }
+      b.onclick=()=>bg.remove(); bg.querySelector('.modal').appendChild(b); },
+    cancel(){ if(closed) return; closed=true; ctl.cancelled=true; bg.remove();
+      toast('已请求取消: 当前这批完成后停止, 不再继续'); }
   };
+  // 点击X或遮罩 = 请求取消(不是"关掉弹窗装没事")
+  bg.addEventListener('click',e=>{
+    const c=e.target.closest('[data-c]');
+    if(!closed && ((c && c.dataset.c==='cancel') || e.target===bg)) ctl.cancel();
+  });
+  return ctl;
 }
 
 /* ============ 4. hash 路由 ============ */
@@ -501,13 +503,13 @@ function renderDashActive(d){
   const daily=d.scan_daily||[];
   const dailyHtml=daily.length
     ? '<div style="margin-bottom:8px;font-size:12px" class="sub">近 7 天扫描：'+
-      daily.map(x=>`${x.d.slice(5)} ${x.n}个`).join(' · ')+'</div>'
+      daily.map(x=>`${esc(String(x.d||'').slice(5))} ${x.n||0}个`).join(' · ')+'</div>'
     : '<div class="sub" style="font-size:12px;margin-bottom:8px">近 7 天无扫描记录</div>';
   const jobs=(d.recent_jobs||[]).map(j=>`
     <div style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:12.5px">
       ${statusBadge(j.status)}
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.target_name)}">${esc(j.target_name)}</span>
-      <span class="sub" style="flex:none">${j.done_count}/${j.total||'?'}</span>
+      <span class="sub" style="flex:none">${j.done_count||0}/${j.total||'?'}</span>
     </div>`).join('');
   el.innerHTML=activeHtml+scansHtml+dailyHtml+(jobs||'<div class="sub" style="font-size:12px">暂无任务</div>');
 }
@@ -585,13 +587,13 @@ function renderDashJobs(d){
   const daily=d.scan_daily||[];
   const dailyHtml=daily.length
     ? '<div style="margin-bottom:8px;font-size:12px" class="sub">近 7 天扫描：'+
-      daily.map(x=>`${x.d.slice(5)} ${x.n}个`).join(' · ')+'</div>'
+      daily.map(x=>`${esc(String(x.d||'').slice(5))} ${x.n||0}个`).join(' · ')+'</div>'
     : '<div class="sub" style="font-size:12px;margin-bottom:8px">近 7 天无扫描记录</div>';
   const jobs=(d.recent_jobs||[]).map(j=>`
     <div style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:12.5px">
       ${statusBadge(j.status)}
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.target_name)}">${esc(j.target_name)}</span>
-      <span class="sub" style="flex:none">${j.done_count}/${j.total||'?'}</span>
+      <span class="sub" style="flex:none">${j.done_count||0}/${j.total||'?'}</span>
     </div>`).join('');
   $('#dashJobs').innerHTML=dailyHtml+(jobs||'<div class="sub" style="font-size:12px">暂无任务</div>');
 }
@@ -775,15 +777,17 @@ function trow(node, depth, live){
   return wrap;
 }
 
+let treeSeq=0;   // 树渲染令牌: 后发起的渲染让在途的旧渲染作废, 避免两套渲染抢画 #treeBox
 async function buildTree(cid, name, live){
+  const seq=++treeSeq;
   const box=$('#treeBox');
   const sameRoot=S.treeCur && S.treeCur.cid===cid && S.treeCur.live===!!live;
   const scrollY=window.scrollY;
   box.innerHTML='';
   S.treeCur={cid,name:name||'',live:!!live};
-  // 同步模式状态
-  if(live && S.treeMode!=='live') switchTreeMode('live');
-  else if(!live && S.treeMode!=='local') switchTreeMode('local');
+  // 同步模式状态(skipLoad: 本函数自己渲染子树, 不能让整树重建来抢画同一块区域)
+  if(live && S.treeMode!=='live') switchTreeMode('live', true);
+  else if(!live && S.treeMode!=='local') switchTreeMode('local', true);
   const head=document.createElement('div');
   head.style.cssText='display:flex;gap:10px;align-items:center;margin-bottom:8px';
   head.innerHTML=`<span class="sub">${live?'🌐 在线':'💾 本地'} · ${esc(name||cid)}</span>`;
@@ -796,12 +800,14 @@ async function buildTree(cid, name, live){
 }
 
 async function initTree(){
+  const seq=++treeSeq;   // 渲染令牌
   // 恢复展开状态
   try{
     const saved=JSON.parse(localStorage.getItem('tree_expanded')||'[]');
     saved.forEach(cid=>S.expanded.add(cid));
   }catch(_){}
   const items=await loadRoots();
+  if(seq!==treeSeq) return;   // 期间已有新渲染接管, 本次作废
   const box=$('#treeBox'); box.innerHTML='';
   S.treeCur=null;
   const h=document.createElement('div');
@@ -820,15 +826,17 @@ async function initTree(){
   });
 }
 async function initLiveTree(){
+  const seq=++treeSeq;   // 渲染令牌
   // 恢复展开状态
   try{
     const saved=JSON.parse(localStorage.getItem('tree_expanded')||'[]');
     saved.forEach(cid=>S.expanded.add(cid));
   }catch(_){}
-  const box=$('#treeBox'); box.innerHTML='';
-  S.treeCur=null;
   let items=[];
   try{ const d=await api('/api/live/0'); items=d.children||d.items||[]; }catch(e){}
+  if(seq!==treeSeq) return;   // 期间已有新渲染接管, 本次作废
+  const box=$('#treeBox'); box.innerHTML='';
+  S.treeCur=null;
   const dirs=items.filter(i=>i.is_dir);
   const h=document.createElement('div');
   h.style.cssText='display:flex;gap:10px;align-items:center;margin-bottom:8px';
@@ -848,13 +856,14 @@ async function initLiveTree(){
 function backLocal(){ initTree().catch(()=>{}); }
 
 /* ---------- 模式切换（本地数据 / 在线浏览） ---------- */
-function switchTreeMode(mode){
+function switchTreeMode(mode, skipLoad){
   if(mode===S.treeMode) return;
   S.treeMode=mode;
   // 切换按钮高亮
   document.querySelectorAll('[data-action="tree-mode"]').forEach(b=>
     b.classList.toggle('on', b.dataset.treeMode===mode));
-  // 加载对应模式的内容
+  // 加载对应模式的内容(skipLoad: 调用方自己负责渲染, 别再起一次整树重建抢画同一块区域)
+  if(skipLoad) return;
   if(mode==='local') initTree().catch(()=>{});
   else initLiveTree().catch(()=>{});
 }
@@ -1024,7 +1033,11 @@ function refreshTreeNode(cid){
   const kids=w.querySelector(':scope > .tkids');
   const tw=w.querySelector(':scope > .trow > .tw');
   if(kids && kids.classList.contains('open') && tw){
-    kids.innerHTML=''; w._built=false; tw.click();
+    // 原地刷新 = 收起再展开(两连点), 净效果"保持展开并重新加载"。
+    // 旧版只点一下是写反的: toggle 把 open 关掉走收起分支 → 折叠+清空+丢展开记忆。
+    kids.innerHTML=''; w._built=false;
+    tw.click();
+    tw.click();
   }
 }
 
@@ -1182,9 +1195,11 @@ function pushHistory(q, count, scope){
   api('/api/search/history',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({q,scope:scope||'',n:count||0})}).catch(()=>{});
 }
+let _searchSeq=0;   // 搜索请求序号: 迟到的旧响应不得覆盖新结果
 async function doSearch(){
   const q=$('#searchQ').value.trim();
   if(!q){ toast('请输入关键字',true); return; }
+  const seq=++_searchSeq;
   if(q.length<2){ toast('至少 2 个字',true); return; }
   const params=new URLSearchParams({q});
   const type=$('#searchType').value;
@@ -1204,6 +1219,7 @@ async function doSearch(){
     if(minMB>0) apiParams.set('min_size',Math.round(minMB*1024*1024));
     if(maxMB>0) apiParams.set('max_size',Math.round(maxMB*1024*1024));
     const d=await api('/api/search?'+apiParams.toString());
+    if(seq!==_searchSeq) return;   // 期间又发起了新搜索, 本次(旧)结果作废
     // 去重：若文件位于某个结果目录的子树内（直接父级或更深层），只显示目录（展开可见）
     const dirCids=new Set(d.rows.filter(r=>r.is_dir).map(r=>r.cid));
     const dirPaths=d.rows.filter(r=>r.is_dir).map(r=>r.path).filter(Boolean);
@@ -2162,6 +2178,7 @@ async function runBatchDelete(items,label){
   const pg=appProgress(label);
   let success=0, fail=0;
   for(let i=0;i<items.length;i+=5){
+    if(pg.cancelled){ toast(`已取消: 已处理 ${i}/${items.length} · 成功 ${success} · 失败 ${fail}`); return; }
     const chunk=items.slice(i,i+5);
     try{
       const r=await api('/api/fs/delete/batch',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2638,7 +2655,9 @@ async function runAiMoves(plan){
   const movedCids=[];
   for(const toCid of Object.keys(byTo)){
     const items=byTo[toCid];
+    if(pg.cancelled) break;
     for(let i=0;i<items.length;i+=5){
+      if(pg.cancelled) break;
       const chunk=items.slice(i,i+5);
       try{
         const r=await api('/api/fs/move',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2672,6 +2691,7 @@ async function runAiMoves(plan){
       toast('⚠ 移动完成但状态同步失败: '+e.message+'. 请手动刷新页面',true);
     }
   }
+  if(pg.cancelled) toast(`已取消: 成功 ${success}，失败 ${fail}`);
   pg.close(`完成：成功 ${success}，失败 ${fail}`);
   loadSuggestions(); loadApproved(); loadHealth(); loadMoveHistory(); S.roots=null;
 }
@@ -3615,9 +3635,15 @@ setInterval(async ()=>{
 
 /* ---------- 启动 ---------- */
 loadHealth(); setInterval(loadHealth, 60000);
-setInterval(()=>{ if($('#p-scan').classList.contains('on')) refreshJobs(); }, 4000);
-setInterval(()=>{ if($('#p-transfer').classList.contains('on')) refreshTasks(); }, 4000);
-setInterval(()=>{ if($('#p-ai').classList.contains('on')) refreshAiBatches(); }, 4000);
+/* 防重入: 上一轮还没回来(接口慢/30s超时)就跳过本轮, 避免两次响应交错把列表改乱 */
+function _tick(fn){
+  if(fn._busy) return;
+  fn._busy=true;
+  Promise.resolve().then(fn).catch(()=>{}).finally(()=>{ fn._busy=false; });
+}
+setInterval(()=>{ if($('#p-scan').classList.contains('on')) _tick(refreshJobs); }, 4000);
+setInterval(()=>{ if($('#p-transfer').classList.contains('on')) _tick(refreshTasks); }, 4000);
+setInterval(()=>{ if($('#p-ai').classList.contains('on')) _tick(refreshAiBatches); }, 4000);
 setInterval(pollLogs, 2000);
 bindDupControls();
 /* 搜索页：大小上下限输入后自动防抖搜索 */

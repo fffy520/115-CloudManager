@@ -119,19 +119,53 @@ def ensure_seed_tags():
                 pass
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         added = 0
+        cat_seq = {}   # 分类内序号: 按种子设计顺序排(4K→1080P→720P…), 不再掉进字母乱序
         for name, cat, color in SEED_TAGS:
             if name in deleted:
                 continue
+            cat_seq[cat] = cat_seq.get(cat, -1) + 1
             cur = con.execute(
-                "INSERT OR IGNORE INTO tags(name,category,color,created_at) VALUES(?,?,?,?)",
-                (name, cat, color, now))
+                "INSERT OR IGNORE INTO tags(name,category,color,sort_order,created_at)"
+                " VALUES(?,?,?,?,?)",
+                (name, cat, color, cat_seq[cat], now))
             if cur.rowcount > 0:
                 added += 1
         if added:
             logbus.pub("标签", f"新增 {added} 个种子标签", lv="ok")
-            con.commit()
+        _normalize_seed_order(con)   # 没被手动排过的分类, 按种子设计顺序排
+        con.commit()
     finally:
         con.close()
+
+
+def _normalize_seed_order(con):
+    """把"没被用户手动排过"的分类按种子设计顺序排(4K→1080P→720P…)。
+    为什么不能只按 id 排: 老库当年就是按字母序创建的, id 顺序=字母顺序, 治不了本。
+    用户在编辑模式拖过序的分类会被写进 app_settings:tag_sort_manual 标记,
+    本函数永不改动带标记的分类(拖过 = 以用户为准)。每分类内: 种子按设计顺序在前,
+    用户/规则建的标签按创建顺序接在后面。"""
+    manual = set()
+    row = con.execute("SELECT value FROM app_settings WHERE key='tag_sort_manual'").fetchone()
+    if row:
+        try:
+            manual = set(json.loads(row["value"]))
+        except Exception:
+            pass
+    cats = {r["category"] for r in con.execute("SELECT DISTINCT category FROM tags")}
+    for cat in cats - manual:
+        seq = 0
+        seeded = set()
+        for name, c, _color in SEED_TAGS:
+            if c != cat:
+                continue
+            seeded.add(name)
+            con.execute("UPDATE tags SET sort_order=? WHERE name=? AND category=?",
+                        (seq, name, cat))
+            seq += 1
+        for r in con.execute("SELECT id, name FROM tags WHERE category=? ORDER BY id", (cat,)):
+            if r["name"] not in seeded:
+                con.execute("UPDATE tags SET sort_order=? WHERE id=?", (seq, r["id"]))
+                seq += 1
 
 
 def mark_seed_deleted(tag_name: str):
@@ -169,13 +203,29 @@ def list_tags() -> list:
 
 
 def reorder_tags(tag_ids: list):
-    """保存标签拖拽排序: tag_ids 按用户当前顺序排列, 依次写入 sort_order"""
+    """保存标签拖拽排序: tag_ids 按用户当前顺序排列, 依次写入 sort_order
+    (拖拽仅限同分类内, 这批 id 属于同一分类)。保存后给该分类打"手动排过"标记,
+    之后启动时的种子顺序修正永不再动它 —— 拖过就以用户为准。"""
     if not tag_ids:
         return
     con = get_conn()
     try:
-        for i, tid in enumerate(tag_ids):
-            con.execute("UPDATE tags SET sort_order=? WHERE id=?", (i, int(tid)))
+        ids = [int(t) for t in tag_ids]
+        for i, tid in enumerate(ids):
+            con.execute("UPDATE tags SET sort_order=? WHERE id=?", (i, tid))
+        qm = ",".join("?" * len(ids))
+        cats = {r["category"] for r in con.execute(
+            f"SELECT DISTINCT category FROM tags WHERE id IN ({qm})", ids)}
+        manual = set()
+        row = con.execute("SELECT value FROM app_settings WHERE key='tag_sort_manual'").fetchone()
+        if row:
+            try:
+                manual = set(json.loads(row["value"]))
+            except Exception:
+                pass
+        manual |= cats
+        con.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('tag_sort_manual',?)",
+                    (json.dumps(sorted(manual), ensure_ascii=False),))
         con.commit()
     finally:
         con.close()
@@ -188,9 +238,13 @@ def create_tag(name: str, category: str = "自定义", color: str = "") -> int:
     category = (category or "自定义").strip() or "自定义"
     con = get_conn()
     try:
+        # 新标签排到本分类末尾(sort_order 全 0 会显示成字母乱序)
+        nxt = con.execute(
+            "SELECT COALESCE(MAX(sort_order),0)+1 FROM tags WHERE category=?",
+            (category,)).fetchone()[0]
         cur = con.execute(
-            "INSERT INTO tags(name,category,color,created_at) VALUES(?,?,?,?)",
-            (name, category, (color or "").strip(),
+            "INSERT INTO tags(name,category,color,sort_order,created_at) VALUES(?,?,?,?,?)",
+            (name, category, (color or "").strip(), nxt,
              datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         con.commit()
         return cur.lastrowid
@@ -206,9 +260,12 @@ def get_or_create(name: str, category: str = "自定义", color: str = "") -> in
         row = con.execute("SELECT id FROM tags WHERE name=?", ((name or "").strip(),)).fetchone()
         if row:
             return row["id"]
+        nxt = con.execute(
+            "SELECT COALESCE(MAX(sort_order),0)+1 FROM tags WHERE category=?",
+            (category,)).fetchone()[0]
         cur = con.execute(
-            "INSERT OR IGNORE INTO tags(name,category,color,created_at) VALUES(?,?,?,?)",
-            ((name or "").strip(), category, color,
+            "INSERT OR IGNORE INTO tags(name,category,color,sort_order,created_at) VALUES(?,?,?,?,?)",
+            ((name or "").strip(), category, color, nxt,
              datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         con.commit()
         if cur.lastrowid:

@@ -350,6 +350,10 @@ def run_rules(clean: bool = False, dry_run: bool = True) -> dict:
             cids = list(dict.fromkeys(c for c, _ in matched.get(name, [])))
             if not cids:
                 continue
+            # get_or_create 走的是另一条 SQLite 连接, 而本连接此时可能攥着未提交的写入
+            # (上一轮 node_tags 批量插入 / clean 的 DELETE)。SQLite 同一时刻只允许一个
+            # 写入方, 不先提交就会撞 "database is locked"(全新安装首次跑规则引擎必现)。
+            con.commit()
             tid = tags.get_or_create(name, category="属性")
             before = con.total_changes
             for i in range(0, len(cids), 500):

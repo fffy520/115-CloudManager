@@ -37,9 +37,10 @@ BACKUP_DIR = config.BACKUP_DIR
 COOKIE_FILE = config.COOKIE_FILE
 
 app = FastAPI(title="115 管理器")
-scan_mgr = scanner.get_manager()  # 全局单例: transfer_worker 也通过 get_manager() 取同一实例, 避免多实例各自跑扫描线程
-transfer_mgr = transfer_worker.TransferManager()
-ai_mgr = ai_worker.AiManager()
+# 三个后台管理器全部走单例工厂: 每 new 一次就多一条永不退出的工作线程
+scan_mgr = scanner.get_manager()
+transfer_mgr = transfer_worker.get_manager()
+ai_mgr = ai_worker.get_manager()
 
 # ---------- 定时扫描调度(每分钟检查 schedules 表) ----------
 def _schedule_tick():
@@ -171,23 +172,38 @@ def _restore_backup(name: str) -> dict:
         raise HTTPException(404, "备份不存在")
     # 先备份当前（保护性恢复）
     safety = _backup_now(f"pre-restore-{name[:30]}")
-    # 停止三个 worker(避免并发写入)
+    # ① 真正停稳三个 worker 再动文件。旧版这里是"新建"实例 —— 不但没停住,
+    #    还每恢复一次泄漏两条工作线程, 并把正在跑的任务改回 queued 重复执行。
     logbus.pub("系统", "恢复前停止后台任务...", lv="warn")
-    scan_mgr = scanner.get_manager()
-    transfer_mgr = transfer_worker.TransferManager()
-    ai_mgr = ai_worker.AiManager()
-    # 断开所有 SQLite 连接（WAL checkpoint）
-    con = _db()
-    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    con.close()
-    # 覆盖
-    shutil.copy2(src, TREE_DB)
-    # 清理 WAL/SHM 残留
-    for ext in ("-wal", "-shm"):
-        p = TREE_DB + ext
-        if os.path.exists(p):
-            try: os.remove(p)
-            except: pass
+    workers = (scanner.get_manager(), transfer_worker.get_manager(), ai_worker.get_manager())
+    stopped = [w.shutdown(timeout=30) for w in workers]
+    if not all(stopped):
+        for w in workers:
+            try:
+                w.resume()
+            except Exception as e:
+                logbus.pub("系统", f"后台任务复工失败(需重启程序): {e}", lv="error")
+        raise HTTPException(500, "后台任务 30 秒内未能停稳, 已放弃恢复(可稍后重试)")
+    try:
+        # ② 确认无任何写入方后: WAL 落盘 → 覆盖 → 清残留。
+        #    顺序是防 "database is malformed" 的关键: 有连接开着时删 -wal/-shm 等于毁库。
+        con = _db()
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+        shutil.copy2(src, TREE_DB)
+        for ext in ("-wal", "-shm"):
+            p = TREE_DB + ext
+            if os.path.exists(p):
+                try: os.remove(p)
+                except: pass
+    finally:
+        # ③ 复工(恢复出来的"卡在 running"的任务会被自动退回排队续跑)。
+        #    逐个尽力复工: 一个失败不能连累其他两个, 否则后台全瘫。
+        for w in workers:
+            try:
+                w.resume()
+            except Exception as e:
+                logbus.pub("系统", f"后台任务复工失败(需重启程序): {e}", lv="error")
     logbus.pub("系统", f"数据库恢复完成: {name} (恢复前状态已备份到 {safety['name']})", lv="warn")
     return {"restored_from": name, "safety_backup": safety["name"]}
 
@@ -928,22 +944,18 @@ def scan_resume(jid: int):
 
 @app.post("/api/scan/pause/{jid}")
 def scan_pause(jid: int):
-    """暂停正在运行的任务: 设置状态为 paused, 利用断点续扫恢复"""
-    # 先通知扫描线程停止（在更新数据库之前，否则stop方法会因状态已变而返回False）
-    scan_mgr.stop(jid)
+    """暂停排队/运行/等待重试的任务: 写库置 paused 并通知线程, 断点续扫恢复"""
     con = scanner.get_conn()
     try:
         row = con.execute("SELECT status FROM scan_jobs WHERE id=?", (jid,)).fetchone()
-        if not row:
-            raise HTTPException(404, "任务不存在")
-        if row["status"] not in ("running", "queued", "retry_wait"):
-            raise HTTPException(400, f"当前状态 [{row['status']}] 无法暂停")
-        con.execute(
-            "UPDATE scan_jobs SET status='paused', finished_at=? WHERE id=?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), jid))
-        con.commit()
     finally:
         con.close()
+    if not row:
+        raise HTTPException(404, "任务不存在")
+    # 状态由 stop() 统一落库(先写库再发信号), 避免旧版"先发信号后写库"的竞态:
+    # 线程可能在写库前就收尾成 stopped, 随后被无条件覆盖成 paused
+    if not scan_mgr.stop(jid, final_status="paused"):
+        raise HTTPException(400, f"当前状态 [{row['status']}] 无法暂停")
     logbus.pub("扫描", f"任务 #{jid} 已暂停(可随时继续)", lv="ok")
     return {"paused": jid}
 

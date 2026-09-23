@@ -614,12 +614,20 @@ def parse_ai_items(content: str, expect_cids: list, taxonomy: dict) -> dict:
             except Exception:
                 conf = 0.0
             reason_text = str(it.get("reason", "")).strip()[:60]
-            # 校验: reason 里提到的类型与 category 不一致时，以 reason 为准
-            if cat in types and reason_text:
-                for t in types:
-                    if t != cat and t in reason_text:
-                        cat = t
-                        break
+            # category 是模型按分类体系专门输出的字段, 权威性高于自由文本 reason。
+            # 旧版"reason 提到别的类别名就以 reason 为准改判"是反向操作: 理由里出现
+            # "音乐"二字就能把「音乐纪录片」从 电影 改成 音乐, 错误分类直接进审核列表。
+            # 现在: ①category 缺失/不在体系内 → 才用 reason 兜底猜(取最长匹配, 具体优先);
+            #       ②两者不一致 → 不改分类, 降置信度并打标记, 交给人工审核。
+            if reason_text:
+                mentioned = max((t for t in types if t in reason_text),
+                                key=len, default="")
+                if cat not in types:
+                    if mentioned:
+                        cat = mentioned
+                elif mentioned and mentioned != cat:
+                    conf = max(0.0, round(conf - 0.1, 2))
+                    reason_text = "⚠分类存疑: " + reason_text
             out[cid] = {"category": cat, "resolution": res, "subtitle": sub,
                         "country": country, "quality": quality, "audio": audio,
                         "confidence": conf,
@@ -649,6 +657,18 @@ def build_plan_groups(items: list, disc_separate: bool = True):
 # ---------------- 后台任务 ----------------
 
 
+# 全局单例(镜像 scanner.get_manager): 谁都别再自己 new AiManager ——
+# 每 new 一次就多一条永不退出的工作线程(旧版恢复接口就是这么泄漏的)
+_manager = None
+
+
+def get_manager():
+    global _manager
+    if _manager is None:
+        _manager = AiManager()
+    return _manager
+
+
 class AiManager:
     """全局单例: 串行分析线程 + 断点续跑"""
 
@@ -658,6 +678,7 @@ class AiManager:
         con.commit()
         con.close()
         self.worker = None
+        self._shutdown = threading.Event()                   # 停工信号(备份恢复/退出前用)
         self._stop_events: dict[int, threading.Event] = {}  # 按 batch_id 记录停止事件
         # 单进程直跑, 见 scanner.ScanManager.__init__ 说明: 必须无条件启动分析线程
         self._start_worker()
@@ -676,23 +697,50 @@ class AiManager:
             con.close()
 
     def stop(self, batch_id: int) -> bool:
+        """停止排队/运行中的批次。排队中的直接写库拦下(旧版假成功); 运行中的置 stop_event"""
         con = get_conn()
         try:
             row = con.execute("SELECT status FROM ai_batches WHERE id=?", (batch_id,)).fetchone()
-            if row and row["status"] in ("queued", "running"):
-                if batch_id in self._stop_events:
-                    self._stop_events[batch_id].set()
-                return True
-            return False
+            if not row or row["status"] not in ("queued", "running"):
+                return False
+            con.execute(
+                "UPDATE ai_batches SET status='stopped', finished_at=?"
+                " WHERE id=? AND status IN ('queued','running')",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), batch_id))
+            con.commit()
+            ev = self._stop_events.get(batch_id)   # 用 get: 与工作线程的清理 pop 有竞态
+            if ev:
+                ev.set()
+            return True
         finally:
             con.close()
 
+    def shutdown(self, timeout: float = 30) -> bool:
+        """停稳工作线程(备份恢复/退出前调用): 让当前批次断点保存后退出循环"""
+        self._shutdown.set()
+        for ev in list(self._stop_events.values()):
+            ev.set()
+        if self.worker and self.worker.is_alive():
+            self.worker.join(timeout)
+        return self.worker is None or not self.worker.is_alive()
+
+    def resume(self):
+        """复工: 残留的 running 退回排队(断点续跑), 重启工作线程"""
+        self._shutdown.clear()
+        con = get_conn()
+        con.execute("UPDATE ai_batches SET status='queued' WHERE status='running'")
+        con.commit()
+        con.close()
+        self._start_worker()
+
     def _start_worker(self):
+        if self.worker is not None and self.worker.is_alive():
+            return   # 防重复启动: 两条循环会把同一批次领两遍
         self.worker = threading.Thread(target=self._loop, daemon=True, name="ai-worker")
         self.worker.start()
 
     def _loop(self):
-        while True:
+        while not self._shutdown.is_set():
             try:
                 con = get_conn()
                 job = con.execute(
@@ -775,11 +823,13 @@ class AiManager:
                 target_path = calc_target_path(item["category"], item.get("country", ""))
                 con.execute(
                     "INSERT OR REPLACE INTO ai_suggestions"
-                    "(cid,name,pid,hint,category,resolution,attribute,format,country,quality,audio,"
+                    "(cid,name,pid,hint,category,resolution,attribute,format,subtitle,"
+                    "country,quality,audio,"
                     "suggested_name,confidence,reason,source,status,batch_id,target_path,updated_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (it["cid"], it["name"], scope_cid, "",
                      item["category"], item.get("resolution", ""), "", "",
+                     item.get("subtitle", ""),
                      item.get("country", ""), item.get("quality", ""), item.get("audio", ""),
                      item.get("suggested_name", ""), item["confidence"], item.get("reason", ""),
                      source, "pending", batch_id, target_path,

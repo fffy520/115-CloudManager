@@ -25,6 +25,11 @@ DELAY = 4.0  # 每条之间的基础间隔(秒)
 
 SLUG_RE = re.compile(r"(?:115(?:cdn)?|anxia)\.com/s/([a-z0-9]+)", re.I)
 PW_RE = re.compile(r"password=([^&#\s]+)", re.I)
+# 单独成行的访问码, 形如 "访问码：ab12" / "访问码:ab12"
+PW_LINE_RE = re.compile(r"访问码[：:]\s*(\S+)")
+# xlsx 单元格里的访问码候选: 3-8 位短串且必须"同时含字母和数字"。
+# 纯数字(片名 "2012")、纯字母(片名 "Se7en" 之外的词)不再被误当访问码吃掉。
+PWCELL_RE = re.compile(r"(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{3,8}")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -60,19 +65,25 @@ def parse_text(text: str) -> list:
         # 标题: 链接之外的文字(去掉纯符号)
         title = SLUG_RE.sub("", line).strip()
         title = re.sub(r"https?://\S*", "", title).strip(" \t,-|:：")
-        # 原生115分享: 链接在第一行，标题和访问码在后续行
+        # 原生115分享: 链接在第一行，标题和访问码在后续行。
+        # 顺序关键: 必须先认访问码行、再消费标题行 —— "链接+访问码"(无标题)是
+        # 最常见格式, 旧代码先消费标题会把访问码当标题吃掉, 该格式 100% 转存失败。
+        if not pw and i + 1 < len(lines):
+            pm2 = PW_LINE_RE.match(lines[i + 1].strip())
+            if pm2:
+                pw = pm2.group(1).strip()
+                i += 1
+        # 标题: 下一行不是链接/访问码也不是空行 → 当作标题
         if not title and i + 1 < len(lines):
             next_line = lines[i + 1].strip()
-            # 下一行不是链接也不是空行 → 当作标题
-            if next_line and not SLUG_RE.search(next_line):
+            if next_line and not SLUG_RE.search(next_line) and not PW_LINE_RE.match(next_line):
                 title = next_line.strip(" \t,-|:：")
                 i += 1
-        # 访问码兜底: 下一行含 "访问码：xxx" 且URL里没密码
+        # 三行格式(链接+标题+访问码): 消费完标题再往后认一次访问码
         if not pw and i + 1 < len(lines):
-            pw_line = lines[i + 1].strip()
-            pw_match = re.match(r"访问码[：:]\s*(\S+)", pw_line)
-            if pw_match:
-                pw = pw_match.group(1).strip()
+            pm2 = PW_LINE_RE.match(lines[i + 1].strip())
+            if pm2:
+                pw = pm2.group(1).strip()
                 i += 1
         if len(title) > 120:
             title = title[:120]
@@ -116,15 +127,16 @@ def parse_upload(filename: str, content: bytes) -> list:
                     pw = pm.group(1).strip()
                 pw_idx = -1
                 if not pw:
-                    # 访问码兜底: 同行其他单元格里的短字母数字串
+                    # 访问码兜底: 同行其他单元格里"字母+数字混合"的短串才当访问码,
+                    # 纯数字片名(如 "2012")不再被误吃成访问码
                     for i, c in enumerate(cells):
-                        if i != link_idx and re.fullmatch(r"[a-zA-Z0-9]{3,8}", c):
+                        if i != link_idx and PWCELL_RE.fullmatch(c):
                             pw = c
                             pw_idx = i
                             break
                 title = " ".join(c for i, c in enumerate(cells)
                                  if i != link_idx and i != pw_idx
-                                 and not re.fullmatch(r"[a-zA-Z0-9]{3,8}", c))
+                                 and not PWCELL_RE.fullmatch(c))
                 title = re.sub(r"https?://\S*", "", title).strip(" \t,-|:：")[:120]
                 items.append({
                     "share_code": slug, "receive_code": pw, "title": title,
@@ -143,6 +155,18 @@ def parse_upload(filename: str, content: bytes) -> list:
 
 # ---------------- 转存任务 ----------------
 
+# 全局单例(镜像 scanner.get_manager): 谁都别再自己 new TransferManager ——
+# 每 new 一次就多一条永不退出的工作线程(旧版恢复接口就是这么泄漏的)
+_manager = None
+
+
+def get_manager() -> "TransferManager":
+    global _manager
+    if _manager is None:
+        _manager = TransferManager()
+    return _manager
+
+
 class TransferManager:
     def __init__(self):
         # 服务重启时, 上次卡在 running 的任务重置为 queued(断点续传)
@@ -151,6 +175,7 @@ class TransferManager:
         con.commit()
         con.close()
         self.worker = None
+        self._shutdown = threading.Event()                   # 停工信号(备份恢复/退出前用)
         self._stop_events: dict[int, threading.Event] = {}  # 按 task_id 记录停止事件
         # 单进程直跑, 见 scanner.ScanManager.__init__ 说明: 必须无条件启动转存线程
         self._start_worker()
@@ -172,21 +197,50 @@ class TransferManager:
         return task_id
 
     def stop(self, task_id: int) -> bool:
+        """停止排队/运行中的任务。排队中的直接写库拦下(旧版只认 running, 假成功)"""
         con = get_conn()
-        row = con.execute("SELECT status FROM transfer_tasks WHERE id=?", (task_id,)).fetchone()
-        con.close()
-        if row and row["status"] == "running":
-            if task_id in self._stop_events:
-                self._stop_events[task_id].set()
+        try:
+            row = con.execute("SELECT status FROM transfer_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row or row["status"] not in ("queued", "running"):
+                return False
+            con.execute(
+                "UPDATE transfer_tasks SET status='stopped', finished_at=?"
+                " WHERE id=? AND status IN ('queued','running')",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), task_id))
+            con.commit()
+            ev = self._stop_events.get(task_id)   # 用 get: 与工作线程的清理 pop 有竞态
+            if ev:
+                ev.set()
             return True
-        return False
+        finally:
+            con.close()
+
+    def shutdown(self, timeout: float = 30) -> bool:
+        """停稳工作线程(备份恢复/退出前调用): 让当前任务断点保存后退出循环"""
+        self._shutdown.set()
+        for ev in list(self._stop_events.values()):
+            ev.set()
+        if self.worker and self.worker.is_alive():
+            self.worker.join(timeout)
+        return self.worker is None or not self.worker.is_alive()
+
+    def resume(self):
+        """复工: 残留的 running 退回排队(断点续传), 重启工作线程"""
+        self._shutdown.clear()
+        con = get_conn()
+        con.execute("UPDATE transfer_tasks SET status='queued' WHERE status='running'")
+        con.commit()
+        con.close()
+        self._start_worker()
 
     def _start_worker(self):
+        if self.worker is not None and self.worker.is_alive():
+            return   # 防重复启动: 两条循环会把同一任务领两遍
         self.worker = threading.Thread(target=self._loop, daemon=True, name="transfer-worker")
         self.worker.start()
 
     def _loop(self):
-        while True:
+        while not self._shutdown.is_set():
             try:
                 con = get_conn()
                 task = con.execute(
@@ -228,36 +282,42 @@ class TransferManager:
                     self._stop_events.pop(task_id, None)
                     con.close()
                     return
-                status, msg, snap_items = self._transfer_one(r["share_code"], r["receive_code"], target_cid, cookie)
+                # ① 快照(转存前): 记下目标目录现状, 用于转存后差集对账。
+                #    铁律: 本地树只登记"对账确认的新项"(网盘真编号/真名字/真大小),
+                #    绝不写占位记录 —— 旧版"分享侧 fid 占位 + 按名字校准"会产生
+                #    云端查无此项的幽灵节点(占位记录没被校准命中就永远残留)。
+                before_ids = None
+                try:
+                    before_ids = {it["cid"] for it in api115.list_children_paged(target_cid, cookie)}
+                except Exception as e:
+                    logbus.pub("转存", f"#{task_id} 快照失败(转存照常, 本地树由扫描补齐): {str(e)[:80]}",
+                               lv="warn")
+                status, msg = self._transfer_one(r["share_code"], r["receive_code"], target_cid, cookie)
                 stats[status] += 1
                 _lv = {"success": "ok", "repeat": "warn", "expired": "warn"}.get(status, "error")
                 _st = {"success": "成功", "repeat": "已存在", "expired": "已失效"}.get(status, "失败")
                 logbus.pub("转存", f"#{task_id} [{idx}/{len(rows)}] {r['title'] or r['share_code']}"
                            f": {_st} — {msg[:80]}", lv=_lv)
-                # 转存成功后同步到本地 tree_nodes，并自动触发高优先级扫描
+                # ② 对账(转存后): 新出现的项 = 这次转存的成果, 直接用真编号登记,
+                #    并给新文件夹排高优先级扫描补全内部结构
                 if status == "success":
-                    logbus.pub("转存", f"#{task_id} 转存成功, snap_items={len(snap_items) if snap_items else 0} 个", lv="info")
-                    if snap_items:
+                    if before_ids is None:
+                        logbus.pub("转存", f"#{task_id} 未拍到快照, 跳过本地登记(可对该目录发起扫描补齐)",
+                                   lv="warn")
+                    else:
                         try:
-                            self._sync_to_tree(con, snap_items, target_cid, cookie)
-                            # 对新转存的文件夹创建高优先级扫描任务
-                            import scanner
-                            for item in snap_items:
-                                is_dir = item.get("fc", 1) == 0  # fc=0 表示文件夹
-                                if is_dir:
-                                    # 使用 _sync_to_tree 校准后的真实cid
-                                    name = item.get("n") or item.get("name") or ""
-                                    # 从数据库获取校准后的真实cid
-                                    real_row = con.execute(
-                                        "SELECT cid FROM tree_nodes WHERE pid=? AND name=?",
-                                        (target_cid, name)).fetchone()
-                                    if real_row:
-                                        real_cid = real_row["cid"]
-                                        logbus.pub("转存", f"#{task_id} 创建扫描任务: cid={real_cid}, name={name}", lv="info")
-                                        job_id = scanner.get_manager().submit(real_cid, name, priority=1)
-                                        logbus.pub("转存", f"#{task_id} 自动创建高优先级扫描任务 #{job_id}: {name}", lv="ok")
+                            after = api115.list_children_paged(target_cid, cookie)
+                            new_items = [it for it in after if it["cid"] not in before_ids]
+                            self._sync_new_items(con, new_items, target_cid)
+                            logbus.pub("转存", f"#{task_id} 对账完成: 新登记 {len(new_items)} 项(全部真编号)",
+                                       lv="ok")
+                            for it in new_items:
+                                if it["is_dir"]:
+                                    job_id = scanner.get_manager().submit(it["cid"], it["name"], priority=1)
+                                    logbus.pub("转存", f"#{task_id} 自动创建高优先级扫描任务 #{job_id}: {it['name']}", lv="ok")
                         except Exception as sync_err:
-                            logbus.pub("转存", f"#{task_id} 同步/扫描失败: {sync_err}", lv="error")
+                            # 宁缺毋假: 对账失败就不登记, 交给扫描全量补齐
+                            logbus.pub("转存", f"#{task_id} 对账失败, 本地树交由扫描补齐: {sync_err}", lv="warn")
                 con.execute(
                     "UPDATE transfer_items SET status=?, message=?, processed_at=? WHERE id=?",
                     (status, msg[:200], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), r["id"]))
@@ -286,12 +346,12 @@ class TransferManager:
             con.close()
 
     def _transfer_one(self, share_code: str, receive_code: str, target_cid: str, cookie: str):
-        """单条转存, 返回 (status, message, snap_items)"""
+        """单条转存, 返回 (status, message)。本地树登记不在这里做, 由调用方差集对账"""
         try:
             snap = api115.share_snap(share_code, receive_code, cookie)
             if not snap.get("state"):
                 msg = snap.get("error", "分享无效或访问码错误")
-                return api115.classify_transfer_error(msg), msg, []
+                return api115.classify_transfer_error(msg), msg
             data = snap.get("data") or {}
             snap_items = data.get("list") or []
             fids = []
@@ -302,63 +362,30 @@ class TransferManager:
                 if fid and str(fid) != "0":
                     fids.append(str(fid))
             if not fids:
-                return "failed", "分享内容为空", []
+                return "failed", "分享内容为空"
             total = 0
             for i in range(0, len(fids), 900):
                 part = fids[i:i + 900]
                 res = api115.share_receive(share_code, receive_code, part, target_cid, cookie)
                 if not res.get("state"):
                     msg = res.get("error", "转存失败")
-                    st = api115.classify_transfer_error(msg)
-                    if st == "repeat":
-                        return "repeat", msg, []
-                    return "failed", msg, []
-                total += int((res.get("data") or {}).get("recv_file_count", 0))
-            return "success", f"{len(fids)} 个对象 / {total} 个文件", snap_items
+                    return api115.classify_transfer_error(msg), msg
+                total += int((res.get("data") or {}).get("recv_file_count", 0) or 0)
+            return "success", f"{len(fids)} 个对象 / {total} 个文件"
         except Exception as e:
-            return "failed", f"异常: {e}", []
+            return "failed", f"异常: {e}"
 
-    def _sync_to_tree(self, con, snap_items, target_cid, cookie):
-        """转存后同步新项到 tree_nodes: 乐观写入 + 单层查询校准"""
-        # 查 target_cid 的 root（若已扫描过）
+    def _sync_new_items(self, con, new_items, target_cid):
+        """把对账确认的新项登记进本地树(真编号/真名字/真大小, 均来自网盘列目录结果)"""
+        if not new_items:
+            return 0
         row = con.execute(
             "SELECT root FROM tree_nodes WHERE cid=?", (target_cid,)).fetchone()
         root = (row["root"] if row else None) or target_cid
-
-        # 乐观写入：用 snap 的 name/size，cid 暂用 fid（转存后会变）
-        for item in snap_items:
-            name = item.get("n") or item.get("name") or "?"
-            size = item.get("s", 0) or 0
-            is_dir = 1 if item.get("fc", 1) == 0 else 0
-            fid = str(item.get("fid") or item.get("cid") or "")
-            if not fid or fid == "0":
-                continue
-            # 验证: 跳过明显的根目录cid（pid==cid 表示根目录）
-            if fid == target_cid:
-                logbus.pub("转存", f"跳过无效fid={fid} (与target_cid相同), name={name}", lv="warn")
-                continue
+        for it in new_items:
             con.execute(
                 "INSERT OR REPLACE INTO tree_nodes(cid,pid,root,name,is_dir,size)"
                 " VALUES(?,?,?,?,?,?)",
-                (fid, target_cid, root, name, is_dir, size))
-
-        # 单层查询校准：获取真实 cid 替换占位值
-        try:
-            real_items = api115.list_children(target_cid, cookie, offset=0, limit=2000)
-            name_map = {}
-            for ri in real_items.get("items", []):
-                name_map.setdefault(ri["name"], ri)
-            for item in snap_items:
-                name = item.get("n") or item.get("name") or "?"
-                fid = str(item.get("fid") or item.get("cid") or "")
-                ri = name_map.get(name)
-                if ri and ri["cid"] != fid:
-                    con.execute("DELETE FROM tree_nodes WHERE cid=?", (fid,))
-                    con.execute(
-                        "INSERT OR REPLACE INTO tree_nodes(cid,pid,root,name,is_dir,size)"
-                        " VALUES(?,?,?,?,?,?)",
-                        (ri["cid"], target_cid, root, ri["name"], ri["is_dir"], ri["size"]))
-        except Exception as e:
-            logbus.pub("转存", f"cid校准失败: {e}", lv="warn")
-
+                (str(it["cid"]), target_cid, root, it["name"], it["is_dir"], it["size"] or 0))
         con.commit()
+        return len(new_items)

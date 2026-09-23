@@ -220,13 +220,15 @@ font-size:12.5px;line-height:1.8}
   padding:3px 12px;margin:0 8px 8px 0;cursor:pointer;font-size:13px;background:#fbfbfc;user-select:none}
 .tagchip:hover{border-color:var(--accent);color:var(--accent)}
 .tagchip.on{background:var(--accent);border-color:var(--accent);color:#fff}
-.tagchip b{font-weight:600;font-size:12px}
+.tagchip b{font-weight:500;font-size:11px;color:var(--sub)}
+.tagchip.on b{color:#fff;opacity:.85}
 .tagchip .ticon{display:none;cursor:pointer;color:var(--sub);font-size:11px;padding:0 1px}
 /* 编辑模式下才显示编辑/删除按钮, 普通 hover 不再显示 */
 #tagCloud.tags-editing .tagchip .ticon{display:inline-block}
 #tagCloud.tags-editing .tagchip .ticon:hover{color:var(--danger)}
 .tagchip.dragging{opacity:.35;border-style:dashed}
-.tagcat-row{display:contents}
+/* 每组独占一行: 分类名 + 本组标签流式排布, 组与组之间提行(display:contents 会让各组连成一片) */
+.tagcat-row{display:flex;flex-wrap:wrap;align-items:center;margin:0 0 10px}
 .tag-node-list{list-style:none;margin:0;padding:0}
 .tag-node-list li{display:flex;gap:8px;align-items:center;padding:4px 6px;border-bottom:1px dashed var(--line);font-size:13px}
 .tag-node-list li:hover{background:#f6f8fb}

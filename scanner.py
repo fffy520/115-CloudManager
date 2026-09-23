@@ -39,6 +39,7 @@ class ScanManager:
         con.commit()
         con.close()
         self.worker = None
+        self._shutdown = threading.Event()                   # 停工信号(备份恢复/退出前用)
         self._stop_events: dict[int, threading.Event] = {}  # 按 job_id 记录停止事件
         # 始终启动扫描线程。
         # 本项目启动方式均为单进程直跑(server.py 用 uvicorn.run(app, ...) 且未开 reload;
@@ -68,19 +69,53 @@ class ScanManager:
         con.close()
         return jid
 
-    def stop(self, job_id: int) -> bool:
-        """请求停止正在运行/等待重试/排队中的任务"""
+    def stop(self, job_id: int, final_status: str = "stopped") -> bool:
+        """停止/暂停 排队、运行、等待重试中的任务
+        - 排队中: 没有 stop_event, 必须直接写库拦下。旧版只返回 True 不写库,
+          是假成功(接口回 stopped:true, 任务随后照常执行)
+        - 运行/等待重试: 先写库定状态、再置 stop_event。顺序关键: 工作线程收尾时
+          读 DB 状态决定记 stopped 还是 paused, 谁后写谁覆盖, 必须由本方法先定调
+        """
         con = get_conn()
-        row = con.execute("SELECT status FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
-        con.close()
-        if row and row["status"] in ("running", "retry_wait", "queued"):
-            if job_id in self._stop_events:
-                self._stop_events[job_id].set()
+        try:
+            row = con.execute("SELECT status FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
+            if not row or row["status"] not in ("running", "retry_wait", "queued"):
+                return False
+            con.execute(
+                "UPDATE scan_jobs SET status=?, finished_at=?"
+                " WHERE id=? AND status IN ('running','retry_wait','queued')",
+                (final_status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), job_id))
+            con.commit()
+            ev = self._stop_events.get(job_id)   # 用 get: 与工作线程的清理 pop 有竞态
+            if ev:
+                ev.set()
             return True
-        return False
+        finally:
+            con.close()
+
+    def shutdown(self, timeout: float = 30) -> bool:
+        """停稳工作线程(备份恢复/退出前调用): 让当前任务断点保存后退出循环"""
+        self._shutdown.set()
+        for ev in list(self._stop_events.values()):
+            ev.set()
+        if self.worker and self.worker.is_alive():
+            self.worker.join(timeout)
+        return self.worker is None or not self.worker.is_alive()
+
+    def resume(self):
+        """复工: 残留的 running/retry_wait 退回排队(断点续扫), 重启工作线程"""
+        self._shutdown.clear()
+        con = get_conn()
+        con.execute("UPDATE scan_jobs SET status='queued', current_path='', current_cid=''"
+                    " WHERE status IN ('running','retry_wait')")
+        con.commit()
+        con.close()
+        self._start_worker()
 
     # ---------- 内部 ----------
     def _start_worker(self):
+        if self.worker is not None and self.worker.is_alive():
+            return   # 防重复启动: 两条循环会把同一任务领两遍
         self.worker = threading.Thread(target=self._loop, daemon=True, name="scan-worker")
         self.worker.start()
 
@@ -104,7 +139,7 @@ class ScanManager:
         except Exception:
             traceback.print_exc()
 
-        while True:
+        while not self._shutdown.is_set():
             try:
                 con = get_conn()
                 # 优先取高优先级任务，同优先级按ID顺序
@@ -276,10 +311,13 @@ class ScanManager:
             # 可中断等待(用户请求停止时立即结束等待)
             for _ in range(RETRY_WAIT):
                 if self._stop_events.get(job_id, threading.Event()).is_set():
-                    con.execute("UPDATE scan_jobs SET status='stopped', finished_at=? WHERE id=?",
-                                (now(), job_id))
-                    con.commit()
-                    logbus.pub("扫描", f"任务 #{job_id} 在重试等待中被手动停止", lv="warn")
+                    # 状态已由 stop() 写库定调, 这里只兜底: 用户选了暂停就保持 paused
+                    cur = con.execute("SELECT status FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
+                    if not (cur and cur["status"] == "paused"):
+                        con.execute("UPDATE scan_jobs SET status='stopped', finished_at=? WHERE id=?",
+                                    (now(), job_id))
+                        con.commit()
+                        logbus.pub("扫描", f"任务 #{job_id} 在重试等待中被手动停止", lv="warn")
                     return
                 time.sleep(1)
             # 探测: DNS/网络/Cookie 一次过

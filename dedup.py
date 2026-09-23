@@ -49,18 +49,13 @@ def get_duplicates(scope_root: str = None):
             JOIN tree_nodes p ON t.pid = p.cid AND p.pid = p.cid
             WHERE t.is_dir=1 AND t.cid<>t.pid ORDER BY t.name""").fetchall()
 
-    # 每个一级目录的文件数/大小(聚合其子树)
-    subtree = defaultdict(lambda: [0, 0])  # root_cid -> [file_count, size]
-    for r in con.execute("SELECT root, is_dir, size FROM tree_nodes"):
-        if not r["is_dir"]:
-            subtree[r["root"]][0] += 1
-            subtree[r["root"]][1] += r["size"] or 0
+    stats = _member_stats(con, [r["cid"] for r in roots])
     con.close()
 
     groups_map = defaultdict(list)
     for r in roots:
         cid = r["cid"]
-        fc, sz = subtree.get(cid, [0, 0])
+        fc, sz = stats.get(cid, [0, 0])
         groups_map[norm(r["name"])].append({
             "cid": cid, "pid": r["pid"], "name": r["name"], "fc": fc, "sz": sz,
             "path": f'{r["pname"] or "?"} / {r["name"]}',
@@ -82,6 +77,45 @@ def get_duplicates(scope_root: str = None):
         })
     out.sort(key=lambda g: (-len(g["names"]), g["key"].lower()))
     return {"groups": out}
+
+
+def _member_stats(con, member_ids) -> dict:
+    """算出每个成员(一级目录)子树的 [文件数, 大小]。
+    注意: tree_nodes.root 是"扫描根"而非"一级目录", 不能当聚合键 —— 旧版按 root
+    聚合却拿一级目录 cid 去查, 几乎全部查成 (0, 0): 显示 0 文件/0B, 且"精确重复"
+    按 (0,0) 签名聚类整体失真。正确做法:
+      ① SQL 按父目录聚合"直属文件"(重活让数据库干);
+      ② 只对目录(约21万行)沿 pid 链向上累加到最近的成员为止(记忆化防重复爬链)。
+    """
+    direct = defaultdict(lambda: [0, 0])      # 目录cid -> [直属文件数, 直属文件大小]
+    for r in con.execute(
+            "SELECT pid, count(*) AS c, sum(size) AS s FROM tree_nodes"
+            " WHERE is_dir=0 GROUP BY pid"):
+        direct[r["pid"]] = [r["c"], r["s"] or 0]
+    # 目录 -> 父目录(排除锚点 pid==cid 的自环, 向上走到锚点即止)
+    parent = {r["cid"]: r["pid"] for r in con.execute(
+        "SELECT cid, pid FROM tree_nodes WHERE is_dir=1 AND cid<>pid")}
+
+    stats = {m: [0, 0] for m in member_ids}   # 成员cid -> [子树文件数, 子树大小]
+    memo = {}                                 # 目录cid -> 归属成员cid(None=不属于)
+    for dir_cid, (fc, sz) in direct.items():
+        owner, chain, cur, seen = None, [], dir_cid, set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            if cur in memo:
+                owner = memo[cur]
+                break
+            chain.append(cur)
+            if cur in stats:
+                owner = cur
+                break
+            cur = parent.get(cur)
+        for c in chain:                       # 本链路各层归属一致, 记忆化免得重复爬
+            memo[c] = owner
+        if owner:
+            stats[owner][0] += fc
+            stats[owner][1] += sz
+    return stats
 
 
 def get_stats():

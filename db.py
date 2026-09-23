@@ -101,7 +101,7 @@ def _init_tables(con: sqlite3.Connection):
             cid TEXT NOT NULL,
             tag_id INTEGER NOT NULL,
             source TEXT DEFAULT 'manual',
-            assigned_at TEXT,
+            created_at TEXT,
             PRIMARY KEY (cid, tag_id));
         CREATE INDEX IF NOT EXISTS idx_node_tags_tag ON node_tags(tag_id);
         CREATE TABLE IF NOT EXISTS tag_rules (
@@ -112,6 +112,7 @@ def _init_tables(con: sqlite3.Connection):
             on_files INTEGER DEFAULT 1,
             enabled INTEGER DEFAULT 1,
             note TEXT DEFAULT '',
+            sort INTEGER DEFAULT 0,
             created_at TEXT);
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -167,6 +168,17 @@ def _init_tables(con: sqlite3.Connection):
     cols = [r[1] for r in con.execute("PRAGMA table_info(tags)")]
     if "sort_order" not in cols:
         con.execute("ALTER TABLE tags ADD COLUMN sort_order INTEGER DEFAULT 0")
+    # 旧库迁移: node_tags 补 created_at(历史版本叫 assigned_at, 顺带把旧值搬过来)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(node_tags)")]
+    if "created_at" not in cols:
+        con.execute("ALTER TABLE node_tags ADD COLUMN created_at TEXT")
+        if "assigned_at" in cols:
+            con.execute("UPDATE node_tags SET created_at = assigned_at")
+    # 旧库迁移: tag_rules 补 sort(按 id 顺序回填, 保持原有排列)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(tag_rules)")]
+    if "sort" not in cols:
+        con.execute("ALTER TABLE tag_rules ADD COLUMN sort INTEGER DEFAULT 0")
+        con.execute("UPDATE tag_rules SET sort = id")
     con.commit()
 
 

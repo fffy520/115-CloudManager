@@ -598,10 +598,19 @@ function renderDashJobs(d){
 
 /* ============ 6. 目录浏览 ============ */
 /* ---------- 标签角标(树行/详情面板共用) ---------- */
+/* 标签配色: 只认合法 hex(顺带堵掉 CSS 注入), 没配色的用分类主题色, 兜底中性灰 */
+const TAG_CAT_COLORS={'类型':'#7a5af8','分辨率':'#0052d9','字幕':'#2ba471','国家':'#e37318',
+  '画质':'#0aa5a5','音频':'#b0812b','状态':'#e34d59','来源':'#4a5568','属性':'#5b5b6e','自定义':'#8a919c'};
+function tagColor(t){
+  const c=String((t&&t.color)||'').trim();
+  if(/^#[0-9a-fA-F]{6}$/.test(c)) return c;
+  if(/^#[0-9a-fA-F]{3}$/.test(c)) return '#'+c[1]+c[1]+c[2]+c[2]+c[3]+c[3];
+  return TAG_CAT_COLORS[(t&&t.category)||'']||'#8a919c';
+}
 function chipHtml(t){
-  const c=t.color||'#8a919c';
+  const c=tagColor(t);
   return `<span class="tchip" title="标签: ${esc(t.name)}${t.category?(' · '+esc(t.category)):''}" `+
-    `style="background:${esc(c)}1f;color:${esc(c)};border:1px solid ${esc(c)}59">${esc(t.name)}</span>`;
+    `style="background:${c}1f;color:${c};border:1px solid ${c}59">${esc(t.name)}</span>`;
 }
 function renderRowChips(el, tags){
   el.innerHTML=(tags||[]).map(chipHtml).join('');
@@ -2713,7 +2722,7 @@ function renderTagCloud(){
       const showN = isOn && S.tags.per_tag && (t.id in S.tags.per_tag)
         ? S.tags.per_tag[t.id]
         : (t.n||0);
-      const dot=t.color?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${esc(t.color)};flex:none"></span>`:'';
+      const dot=`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${tagColor(t)};flex:none"></span>`;
       return `<span class="tagchip ${isOn?'on':''}" data-action="tag-toggle" data-id="${t.id}" data-cat="${esc(cat)}"
         title="点击 ${isOn?'移除':'加入'}筛选组合">
         ${dot}<span>${esc(t.name)}</span><b>${showN}</b>
@@ -2743,7 +2752,7 @@ function renderTagFilterBar(){
     const t=(S.tags.list||[]).find(x=>x.id===id);
     if(!t) return '';
     const subCount = S.tags.per_tag && (id in S.tags.per_tag) ? S.tags.per_tag[id] : '?';
-    const dot=t.color?`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${esc(t.color)}"></span>`:'';
+    const dot=`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${tagColor(t)}"></span>`;
     return `<span class="tagchip on" style="padding:2px 6px;font-size:12px;cursor:default">
       ${dot}<span>${esc(t.name)}</span>
       <span class="sub" style="margin-left:2px">${subCount}</span>
@@ -2789,10 +2798,13 @@ function toggleTagSelection(id){
   loadTagNodesBySet();
 }
 /* 拖拽排序: 在编辑模式下启用, 只支持同分类内拖拽 */
+/* 拖拽状态放模块级 + 容器监听只绑一次:
+   芯片每次渲染都重建, 状态放闭包里会"新芯片写新闭包、旧监听读旧闭包"对不上;
+   容器监听器反复叠加会让一次拖拽触发 N 个保存请求(监听器泄漏) */
+let dragEl=null, dragCat=null;
 function bindTagDragDrop(){
   const cloud=$('#tagCloud');
   if(!cloud) return;
-  let dragEl=null, dragCat=null;
   cloud.querySelectorAll('.tagchip').forEach(el=>{
     el.draggable=true;
     el.addEventListener('dragstart', e=>{
@@ -2808,6 +2820,9 @@ function bindTagDragDrop(){
       cloud.querySelectorAll('.tagchip.dragging').forEach(x=>x.classList.remove('dragging'));
     });
   });
+  // 容器级监听只绑一次(重复绑定 = 一次拖拽发 N 个保存请求)
+  if(cloud.dataset.dndBound==='1') return;
+  cloud.dataset.dndBound='1';
   // 在每个 chip 上监听 dragover/drop, 判断插入位置
   cloud.addEventListener('dragover', e=>{
     if(!dragEl) return;
@@ -2909,7 +2924,7 @@ async function openTagDlg(cids, title){
   const ordered=tagCats.filter(c=>groups[c]).concat(Object.keys(groups).filter(c=>!tagCats.includes(c)));
   $('#tagDlgList').innerHTML=ordered.map(cat=>{
     const rows=groups[cat].map(t=>{
-      const dot=t.color?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${esc(t.color)};flex:none"></span>`:'';
+      const dot=`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${tagColor(t)};flex:none"></span>`;
       return `<label style="display:flex;gap:7px;align-items:center;padding:3px 2px;cursor:pointer;font-size:13px">
         <input type="checkbox" data-tagpick data-id="${t.id}" ${common.has(t.id)?'checked':''}>
         ${dot}<span>${esc(t.name)}</span><span class="sub">(${t.n||0})</span>

@@ -1634,12 +1634,126 @@ def create_task(req: TaskReq):
 
 
 @app.get("/api/transfer/tasks")
-def task_list(limit: int = 50):
+def task_list(limit: int = 10, offset: int = 0, q: str = "", status: str = ""):
+    """转存任务分页列表。
+    limit/offset 由前端翻页控件驱动; q/status 可选, 作用于列表和后续 count 接口。"""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    where, args = [], []
+    if q.strip():
+        where.append("(name LIKE ? OR target_name LIKE ? OR id = CAST(? AS INTEGER))")
+        like = f"%{q.strip()}%"
+        args += [like, like, q.strip()]
+    if status.strip():
+        where.append("status = ?")
+        args.append(status.strip())
+    sql = "SELECT * FROM transfer_tasks"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    args += [limit, offset]
     con = transfer_worker.get_conn()
-    rows = con.execute(
-        "SELECT * FROM transfer_tasks ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    rows = con.execute(sql, args).fetchall()
     con.close()
-    return {"tasks": [dict(r) for r in rows]}
+    return {"tasks": [dict(r) for r in rows], "limit": limit, "offset": offset}
+
+
+@app.get("/api/transfer/tasks/count")
+def task_count(q: str = "", status: str = ""):
+    """与 task_list 同条件的总条数, 用来算总页数。"""
+    where, args = [], []
+    if q.strip():
+        where.append("(name LIKE ? OR target_name LIKE ? OR id = CAST(? AS INTEGER))")
+        like = f"%{q.strip()}%"
+        args += [like, like, q.strip()]
+    if status.strip():
+        where.append("status = ?")
+        args.append(status.strip())
+    sql = "SELECT COUNT(*) FROM transfer_tasks"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    con = transfer_worker.get_conn()
+    n = con.execute(sql, args).fetchone()[0]
+    con.close()
+    return {"total": n}
+
+
+def _task_is_running_status(s: str) -> bool:
+    return s in ("running", "queued", "retry_wait")
+
+
+@app.delete("/api/transfer/tasks/{tid}")
+def task_delete(tid: int):
+    """删除一条任务记录。运行中/排队中不允许, 与扫描任务保持一致语义;
+    让用户先点停止按钮再回来删, 避免把还在跑的 worker 弄丢指针。"""
+    con = transfer_worker.get_conn()
+    try:
+        row = con.execute("SELECT id, name, status FROM transfer_tasks WHERE id=?", (tid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "任务不存在")
+        if _task_is_running_status(row["status"]):
+            raise HTTPException(400, f"任务正在 [{row['status']}] 状态, 请先停止再删除")
+        # 先删 items, 再删 task —— 防止万一以后迁库, 顺序更安全
+        con.execute("DELETE FROM transfer_items WHERE task_id=?", (tid,))
+        con.execute("DELETE FROM transfer_tasks WHERE id=?", (tid,))
+        con.commit()
+    finally:
+        con.close()
+    logbus.pub("转存", f"任务 #{tid}「{row['name']}」记录已删除", lv="warn")
+    return {"deleted": tid}
+
+
+@app.delete("/api/transfer/tasks")
+def task_delete_batch(scope: str = "page", ids: str = "", q: str = "", status: str = ""):
+    """批量删除。
+    scope=page      : 用 ids(=逗号分隔) 删指定若干条; 对应前端「删除本页」
+    scope=all_done  : 删除所有已结束(非 running/queued/retry_wait)的任务;
+                      对应前端「删除全部已结束」
+    scope=all_done 不接受 ids —— 同时传则忽略 ids, 走 all_done 分支。
+
+    所有运行中/排队的任务都拒绝, 由前端弹窗先停再删。
+    """
+    if scope not in ("page", "all_done"):
+        raise HTTPException(400, "scope 必须为 page 或 all_done")
+
+    con = transfer_worker.get_conn()
+    try:
+        if scope == "all_done":
+            rows = con.execute(
+                "SELECT id, name FROM transfer_tasks "
+                "WHERE status NOT IN ('running','queued','retry_wait')"
+            ).fetchall()
+        else:
+            id_list = [int(s) for s in (ids or "").split(",") if s.strip().isdigit()]
+            if not id_list:
+                return {"deleted": 0, "skipped": 0, "ids": []}
+            qm = ",".join("?" * len(id_list))
+            rows = con.execute(
+                f"SELECT id, name, status FROM transfer_tasks WHERE id IN ({qm})", id_list
+            ).fetchall()
+
+        skipped_ids, to_del_ids, names = [], [], []
+        for r in rows:
+            # 三元 (id, name) 还是 (id, name, status) 取决于上面 SELECT, 这里都接受
+            keys = r.keys()
+            if "status" in keys and _task_is_running_status(r["status"]):
+                skipped_ids.append(r["id"])
+            else:
+                to_del_ids.append(r["id"])
+                names.append(r["name"])
+
+        if to_del_ids:
+            qm2 = ",".join("?" * len(to_del_ids))
+            con.execute(f"DELETE FROM transfer_items WHERE task_id IN ({qm2})", to_del_ids)
+            con.execute(f"DELETE FROM transfer_tasks WHERE id IN ({qm2})", to_del_ids)
+            con.commit()
+
+        if to_del_ids:
+            for tid, nm in zip(to_del_ids, names):
+                logbus.pub("转存", f"任务 #{tid}「{nm}」记录已删除(scope={scope})", lv="warn")
+    finally:
+        con.close()
+    return {"deleted": len(to_del_ids), "skipped": len(skipped_ids), "ids": to_del_ids}
 
 
 @app.get("/api/transfer/tasks/{tid}")

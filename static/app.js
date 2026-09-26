@@ -19,6 +19,13 @@ window.addEventListener('unhandledrejection', e=>{
 });
 
 /* ============ 1. 工具与全局状态 ============ */
+function debounce(fn, ms){
+  let t=null;
+  return function(...a){
+    if(t) clearTimeout(t);
+    t=setTimeout(()=>fn.apply(this,a), ms);
+  };
+}
 const $  = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -86,6 +93,13 @@ const S = {
     nodes:null,                // 当前标签的节点清单
     total:0,
   },
+  tf: {                        // 转存任务列表
+    limit: 10,                 // 每页条数
+    offset: 0,                 // 当前页偏移
+    q: '',                     // 搜索关键字(任务名 / 目标目录 / 编号)
+    status: '',                // 状态筛选: '' = 全部
+    total: 0,                  // 当前筛选下的总条数 (来自 /count)
+  },
 };
 
 /* ============ 2. toast 栈 ============ */
@@ -112,7 +126,7 @@ function appConfirm(opt){
     const bg=document.createElement('div');
     bg.className='modal-bg'; bg.dataset.app='confirm'; bg.style.zIndex=70;
     bg.innerHTML=`<div class="modal" style="max-width:640px">
-      <h3><span></span><span class="close" data-c="n">×</span></h3>
+      <h3><span></span><span class="close">×</span></h3>
       <div class="ac-msg" style="${o.message?'':'display:none'}"></div>
       <div class="ac-warn" style="${o.okWarn?'':'display:none'}"></div>
       ${o.items?'<input class="confirm-filter" placeholder="过滤清单…" style="display:none"><ul class="confirm-list"></ul><div class="sub ac-sum" style="margin-top:6px"></div>':''}
@@ -153,6 +167,8 @@ function appConfirm(opt){
     const done=v=>{ document.removeEventListener('keydown',onKey,true); bg.remove(); res(v); };
     const onKey=e=>{ if(e.key==='Escape'){ e.stopPropagation(); done(false); } };
     bg.addEventListener('click', e=>{
+      // h3 右上角的 × 关闭按钮也走同一份 done(false)
+      if(e.target.closest('.close')) return done(false);
       const c=e.target.closest('[data-c]');
       if(c) done(c.dataset.c==='y');
       else if(e.target===bg) done(false);
@@ -1899,46 +1915,185 @@ async function startTransfer(){
     }catch(e){ return toast('创建目录失败: '+e.message,true); }
   }
   if(!targetCid) return toast('先选择目标目录',true);
-  if(!await appConfirm({title:'开始转存',
-    message:`确认转存 ${S.parsed.length} 条到「${targetName}」？`, okText:'开始转存'})) return;
+  // 不再弹模态确认 —— 解析清单已经让用户看过条目数和目标目录,
+  // 再拦一道弹窗只会成为高频操作的摩擦。直接 toast 提示 + 提交即可,
+  // 真要反悔就在转存任务列表里点"停止"按钮。
+  toast(`已开始转存 ${S.parsed.length} 条 → 「${targetName}」`);
   try{
     const d=await api('/api/transfer/task',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name:$('#tfName').value.trim(),items:S.parsed,target_cid:targetCid,target_name:targetName})});
-    toast('转存任务 #'+d.task_id+' 已开始');
+    // 前面已经 toast 过「已开始转存 N 条 → ...」, 这里不再重复
     S.parsed=[]; $('#parseCard').style.display='none';
     $('#tfText').value=''; $('#tfFile').value='';
     goBtn().disabled=true;
     refreshTasks();
   }catch(e){ toast(e.message,true); }
 }
+/* 转存任务列表: 工具栏 + 卡片列表 + 翻页, 全部由 refreshTasks 维护 */
+const TF_STATUS_LABEL = {
+  '': '全部', queued: '排队', running: '运行', done: '完成',
+  stopped: '已停止', error: '出错', retry_wait: '等待重试'
+};
+
+function ensureTfToolbar(){
+  const el = $('#tfTasks');
+  if(!el || el.querySelector('.tf-toolbar')) return;
+  el.innerHTML = `
+    <div class="tf-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <input id="tfSearch" placeholder="按编号 / 名字 / 目录搜索…" style="flex:1;min-width:160px">
+      <select id="tfStatusFilter" style="width:110px">
+        ${Object.entries(TF_STATUS_LABEL).map(([v,t])=>`<option value="${v}">${t}</option>`).join('')}
+      </select>
+      <button data-action="tf-del-page" class="danger" style="font-size:12.5px"
+              title="仅删除当前页里已结束的任务(运行中会自动跳过)">删除本页</button>
+      <button data-action="tf-del-all-done" class="danger" style="font-size:12.5px"
+              title="一次性清空所有已结束任务的记录">删除全部已结束</button>
+    </div>
+    <div class="tf-toolbar-meta sub" style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px">
+      <span id="tfPageInfo">—</span>
+      <span id="tfPageNav"></span>
+    </div>
+    <div id="tfList"></div>`;
+  // 事件: 搜索 / 状态筛选
+  $('#tfSearch').addEventListener('input', debounce(()=>{
+    S.tf.q = $('#tfSearch').value.trim();
+    S.tf.offset = 0;
+    refreshTasks();
+  }, 350));
+  $('#tfStatusFilter').addEventListener('change', ()=>{
+    S.tf.status = $('#tfStatusFilter').value;
+    S.tf.offset = 0;
+    refreshTasks();
+  });
+  // 同步保存的筛选状态到控件
+  $('#tfSearch').value = S.tf.q;
+  $('#tfStatusFilter').value = S.tf.status;
+}
+
 async function refreshTasks(){
-  let d;
-  try{ d=await api('/api/transfer/tasks'); }catch(e){ return; }
-  const el=$('#tfTasks');
-  if(!d.tasks.length){ el.innerHTML='<div class="empty">暂无转存任务</div>'; return; }
-  if(el.querySelector('.empty')) el.innerHTML='';
-  const existing={};
-  el.querySelectorAll('.dcard[data-tid]').forEach(c=>existing[c.dataset.tid]=c);
-  let prev=null; const seen=new Set();
-  for(const t of d.tasks){
-    const key=String(t.id); seen.add(key);
-    let card=existing[key];
-    if(!card){
-      card=document.createElement('div'); card.className='dcard'; card.dataset.tid=key;
-      card.innerHTML=`<div class="dhead" data-action="task-toggle" data-id="${t.id}" style="cursor:pointer">
-          <span class="tf-badge"></span>
-          <span class="t">#${t.id} ${esc(t.name)} → ${esc(t.target_name)}</span>
-          <span class="sub tf-counts"></span>
+  let d, cnt;
+  try{
+    const params = new URLSearchParams({limit:S.tf.limit, offset:S.tf.offset});
+    if(S.tf.q) params.set('q', S.tf.q);
+    if(S.tf.status) params.set('status', S.tf.status);
+    [d, cnt] = await Promise.all([
+      api('/api/transfer/tasks?' + params.toString()),
+      api('/api/transfer/tasks/count?' + params.toString()),
+    ]);
+  }catch(e){ return; }
+  ensureTfToolbar();
+  S.tf.total = cnt.total;
+
+  const listEl = $('#tfList');
+  listEl.innerHTML = '';
+  // 工具栏状态回写(被 deleted / 翻页后值可能变化)
+  const searchEl = $('#tfSearch'); if(searchEl && searchEl.value !== S.tf.q) searchEl.value = S.tf.q;
+  const filEl = $('#tfStatusFilter'); if(filEl && filEl.value !== S.tf.status) filEl.value = S.tf.status;
+
+  if(!d.tasks.length){
+    listEl.innerHTML = '<div class="empty">暂无转存任务</div>';
+  } else {
+    for(const t of d.tasks){
+      const card=document.createElement('div');
+      card.className='dcard tf-task'; card.dataset.tid=String(t.id);
+      const running = (t.status==='running'||t.status==='queued'||t.status==='retry_wait');
+      const delBtn = running
+        ? `<span class="tf-del-locked" title="任务运行中, 请先停止" style="font-size:12px;color:var(--sub);cursor:not-allowed">🔒</span>`
+        : `<button class="tf-del" data-action="tf-del-one" data-id="${t.id}"
+                  title="删除该条任务记录" style="font-size:12px;padding:2px 8px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;color:var(--danger)">✕</button>`;
+      // 关键: data-action="task-toggle" 只放在"标题区"上(而不是整行),
+      // 否则右侧 ✕ 按钮被点击时, 会同时触发整行折叠, 反之亦然.
+      // 删除按钮槽位独立在外层, 即使点击它, document 派发器只会命中 data-action="tf-del-one".
+      // 标题区 .tf-row 用 grid-column 占据前 4 列, ✕ 槽位独立占第 5 列.
+      card.innerHTML=`<div class="dhead tf-head">
+          <span class="tf-row" data-action="task-toggle" data-id="${t.id}" style="cursor:pointer">
+            <span class="tf-id">#${t.id}</span>
+            ${statusBadge(t.status).replace('class="badge','class="tf-badge badge')}
+            <span class="t tf-title" title="${esc(t.name||'')}">${esc(t.name || '—')}</span>
+            <span class="sub tf-counts">${t.processed}/${t.total} · 成功${t.n_success} 已存${t.n_repeat} 失效${t.n_expired} 失败${t.n_failed}</span>
+          </span>
+          <span class="tf-del-slot">${delBtn}</span>
         </div>
         <div class="dbody"><div class="sub" style="padding:6px">点击展开明细</div></div>`;
+      listEl.appendChild(card);
     }
-    card.querySelector('.tf-badge').outerHTML=statusBadge(t.status).replace('class="badge','class="tf-badge badge');
-    card.querySelector('.tf-counts').textContent=`${t.processed}/${t.total} · 成功${t.n_success} 已存${t.n_repeat} 失效${t.n_expired} 失败${t.n_failed}`;
-    if(!prev){ if(el.firstElementChild!==card) el.prepend(card); }
-    else if(prev.nextElementSibling!==card) prev.after(card);
-    prev=card;
   }
-  for(const k in existing) if(!seen.has(k)) existing[k].remove();
+
+  // 分页信息 + 控件
+  const pages = Math.max(1, Math.ceil(S.tf.total / S.tf.limit));
+  const cur = Math.floor(S.tf.offset / S.tf.limit) + 1;
+  $('#tfPageInfo').textContent =
+    `共 ${S.tf.total} 条 · 第 ${cur}/${pages} 页 · 每页 ${S.tf.limit} 条`;
+  $('#tfPageNav').innerHTML = S.tf.total === 0 ? '' : `
+    <button data-action="tf-page" data-delta="first" ${cur===1?'disabled':''} style="padding:2px 8px">«</button>
+    <button data-action="tf-page" data-delta="prev"  ${cur===1?'disabled':''} style="padding:2px 8px">‹</button>
+    <span style="margin:0 6px">${cur} / ${pages}</span>
+    <button data-action="tf-page" data-delta="next"  ${cur===pages?'disabled':''} style="padding:2px 8px">›</button>
+    <button data-action="tf-page" data-delta="last"  ${cur===pages?'disabled':''} style="padding:2px 8px">»</button>`;
+}
+
+async function tfGoPage(delta){
+  const pages = Math.max(1, Math.ceil(S.tf.total / S.tf.limit));
+  let p = Math.floor(S.tf.offset / S.tf.limit) + 1;
+  if(delta==='first') p = 1;
+  else if(delta==='prev') p = Math.max(1, p-1);
+  else if(delta==='next') p = Math.min(pages, p+1);
+  else if(delta==='last') p = pages;
+  S.tf.offset = (p-1) * S.tf.limit;
+  await refreshTasks();
+}
+
+async function tfDelOne(id){
+  if(!await appConfirm({title:'删除任务记录', message:`确认删除任务 #${id} 的记录?\n只删除记录, 不影响 115 网盘上已转存的目录。`,
+                       danger:true, okText:'删除'})) return;
+  try{
+    await api(`/api/transfer/tasks/${id}`, {method:'DELETE'});
+    toast(`任务 #${id} 记录已删除`);
+    // 删除之后如果本页只剩下被删的那条, 翻回上一页更友好
+    const after = $('#tfList').querySelectorAll('.dcard.tf-task').length;
+    if(after === 1) S.tf.offset = Math.max(0, S.tf.offset - S.tf.limit);
+    refreshTasks();
+  }catch(e){
+    toast('删除失败: '+e.message, true);
+  }
+}
+
+async function tfDelPage(){
+  const cards = $('#tfList').querySelectorAll('.dcard.tf-task');
+  const ids = Array.from(cards).map(c=>c.dataset.tid).filter(Boolean);
+  if(!ids.length) return toast('当前页没有任务', true);
+  // 提前过滤掉 running/queued, 不让用户在弹窗里做无意义的判断
+  const skipRunning = Array.from(cards).filter(c=>{
+    const s = (c.querySelector('.tf-badge')||{}).className || '';
+    return s.includes('b-run') || s.includes('b-que') || s.includes('b-warn');
+  });
+  if(skipRunning.length === ids.length)
+    return toast('当前页全是运行中任务, 无法删除', true);
+  const msg = skipRunning.length
+    ? `本页共 ${ids.length} 条, 其中 ${skipRunning.length} 条运行中会被跳过.\n确认删除其余 ${ids.length - skipRunning.length} 条?`
+    : `确认删除当前页的 ${ids.length} 条任务记录?`;
+  if(!await appConfirm({title:'删除当前页', message:msg,
+                       danger:true, okText:'删除本页'})) return;
+  try{
+    const r = await api(`/api/transfer/tasks?scope=page&ids=${encodeURIComponent(ids.join(','))}`,
+                       {method:'DELETE'});
+    const del = (r&&r.deleted)||0, sk = (r&&r.skipped)||0;
+    toast(`本页已删 ${del} 条${sk?` · 跳过 ${sk} 条运行中`:''}`);
+    refreshTasks();
+  }catch(e){ toast('删除失败: '+e.message, true); }
+}
+
+async function tfDelAllDone(){
+  if(!await appConfirm({title:'删除全部已结束任务', danger:true, okText:'全部删除',
+       message:'将一次性清空所有 [完成/已停止/出错] 状态的任务记录.\n'
+             +'运行中的任务会被自动保留, 你可以稍后处理.\n'
+             +'此操作不可撤销, 确定吗?'})) return;
+  try{
+    const r = await api('/api/transfer/tasks?scope=all_done', {method:'DELETE'});
+    toast(`已清空 ${r.deleted||0} 条历史任务`);
+    S.tf.offset = 0;
+    refreshTasks();
+  }catch(e){ toast('删除失败: '+e.message, true); }
 }
 async function toggleTask(id){
   const body=document.querySelector(`.dcard[data-tid="${id}"] .dbody`);
@@ -3216,6 +3371,10 @@ const ACTIONS={
   'transfer-go': ()=>startTransfer(),
   'tf-target-pick': ()=>tfTargetPick(),
   'task-toggle': el=>toggleTask(+el.dataset.id),
+  'tf-page':    el=>tfGoPage(el.dataset.delta),
+  'tf-del-one': el=>tfDelOne(+el.dataset.id),
+  'tf-del-page':()=>tfDelPage(),
+  'tf-del-all-done':()=>tfDelAllDone(),
   'dup-refresh': ()=>loadDupPage(),
   'dup-scope-pick': ()=>dupScopePick(),
   'dup-toggle': el=>{

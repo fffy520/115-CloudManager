@@ -150,7 +150,7 @@
 <!-- 自动转存 -->
 <div class="panel" id="p-transfer">
   <div class="card">
-    <h3>① 导入分享链接</h3>
+    <h3>导入分享链接</h3>
     <div class="row" style="margin-bottom:8px">
       <input type="file" id="tfFile" accept=".txt,.csv,.xlsx">
       <span class="sub">支持 txt / csv / xlsx（自动提取分享码+访问码+去重）</span>
@@ -162,13 +162,13 @@
     </div>
   </div>
   <div class="card" id="parseCard" style="display:none">
-    <h3>② 确认清单 <span class="sub" id="parseCount"></span></h3>
+    <h3>确认清单 <span class="sub" id="parseCount"></span></h3>
     <div style="max-height:260px;overflow:auto"><table id="parseTable"><thead>
       <tr><th>标题</th><th>分享码</th><th>访问码</th><th></th></tr>
     </thead><tbody></tbody></table></div>
   </div>
   <div class="card">
-    <h3>③ 转存目标</h3>
+    <h3>转存目标</h3>
     <div class="row">
       <input type="hidden" id="tfTargetCid" value="">
       <button id="tfTargetBtn" data-action="tf-target-pick" style="min-width:280px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">

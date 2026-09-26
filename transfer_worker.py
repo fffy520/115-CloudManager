@@ -42,7 +42,11 @@ def get_conn() -> sqlite3.Connection:
 def parse_text(text: str) -> list:
     """从任意文本中解析 115 分享链接
     返回 [{share_code, receive_code, title, one_click}]
-    title 取链接前的同行文字(若有)，或下一行文字（原生115分享格式）"""
+    title 优先级:
+      1) 链接所在行的同行剩余文字(去掉 URL/标点)
+      2) 链接上一行(常见分享文案: 先写标题, 再贴链接)
+      3) 链接下一行(原生115分享: 链接在第一行, 标题在后)
+      注意: 不能把访问码行误当标题吃掉, 见下方注释。"""
     out, seen = [], set()
     lines = text.splitlines() or [text]
     i = 0
@@ -73,7 +77,14 @@ def parse_text(text: str) -> list:
             if pm2:
                 pw = pm2.group(1).strip()
                 i += 1
-        # 标题: 下一行不是链接/访问码也不是空行 → 当作标题
+        # 标题: 优先看"上一行"(常见分享文案: 先写标题、再贴链接),
+        # 没有时再看"下一行"(原生115分享: 链接在前、标题在后)。
+        # 两边都不能是访问码 / URL / 空行, 否则当没看见。
+        if not title and i > 0:
+            prev_line = lines[i - 1].strip()
+            if prev_line and not SLUG_RE.search(prev_line) and not PW_LINE_RE.match(prev_line):
+                title = prev_line.strip(" \t,-|:：")
+                # 上一行的"行号"无需推进, 等外层循环 i+=1 自然划过
         if not title and i + 1 < len(lines):
             next_line = lines[i + 1].strip()
             if next_line and not SLUG_RE.search(next_line) and not PW_LINE_RE.match(next_line):
@@ -181,11 +192,33 @@ class TransferManager:
         self._start_worker()
 
     def create_task(self, name: str, items: list, target_cid: str, target_name: str) -> int:
+        # 没显式传 name 时, 用第一条转存项的 title 作为任务名,
+        # 历史遗留的默认名 "转存 MM-DD HH:MM" 既冗余又因字符数变化导致对齐错位,
+        # 这里改成 "标题" 兜底, UI 一眼能看到这次转的是哪个文件。
+        final_name = (name or "").strip()
+        if not final_name:
+            for it in items or []:
+                t = (it.get("title") or "").strip()
+                if t:
+                    # 标题清洗顺序:
+                    # 1) 去掉所有方括号标签: [tmdbid-xxx] [1080P] [AAC] [REMUX] [HDR10] …
+                    # 2) 去掉结尾独立的格式词: MKV / MP4 / AVI / TS / 内嵌特效 (国语/粤语…)
+                    # 3) 折叠多余空白, 把首尾分隔符 trim 掉。
+                    # 完整带标签的 title 仍保留在 transfer_items.title 里, 此处只是 UI 任务名。
+                    t_clean = re.sub(r"\[[^\]]*\]", "", t)
+                    t_clean = re.sub(
+                        r"(?:\s+[·\-|/,，]?\s*)?\b(?:MKV|MP4|AVI|TS|M2TS|ISO|WMV|FLV|RMVB)\b",
+                        "", t_clean, flags=re.I)
+                    t_clean = re.sub(r"\s{2,}", " ", t_clean).strip(" \t,-|·/:：")
+                    final_name = t_clean[:80] or t[:80]
+                    break
+        if not final_name:
+            final_name = f"转存 {len(items or [])} 条"
         con = get_conn()
         cur = con.execute(
             "INSERT INTO transfer_tasks(name,target_cid,target_name,status,total,created_at)"
             " VALUES(?,?,?,?,?,?)",
-            (name or f"转存 {datetime.now():%m-%d %H:%M}", target_cid, target_name,
+            (final_name, target_cid, target_name,
              "queued", len(items), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         task_id = cur.lastrowid
         con.executemany(

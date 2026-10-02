@@ -762,6 +762,10 @@ function trow(node, depth, live){
               });
             }
             kids.innerHTML='';
+            // 展开后用子项数量更新当前目录的 child_count（在线模式不依赖 API 返回的目录自身属性）
+            node.child_count = ch.length;
+            const metaEl = wrap.querySelector(':scope > .trow > .tmeta');
+            if(metaEl) metaEl.textContent = ch.length ? ch.length+' 项' : '';
             if(!ch.length){ kids.innerHTML='<div class="empty sub" style="padding:6px">空目录</div>'; }
             else{
               ch.forEach(c=>kids.appendChild(trow(c, depth+1, live)));

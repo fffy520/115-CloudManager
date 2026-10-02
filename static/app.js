@@ -665,11 +665,18 @@ function renderDashHeatmap(h){
               <span style="font-size:14px">${m.icon}</span><span>${esc(m.label)}</span>
             </div>`;
     (row.cells||[]).forEach(v=>{
-      const intensity = v>0 ? Math.max(0.08, Math.pow(v/max, 0.5)) : 0;
-      const bg = v>0 ? `background:${m.color};opacity:${intensity.toFixed(2)}` : 'background:#f3f4f6';
-      const fg = (v>0 && intensity>0.55) ? '#fff' : 'var(--txt)';
+      // 用 rgba 通过 alpha 控制浓度, 文字始终保持深色, 保证可读性
+      const alpha = v>0 ? Math.max(0.10, Math.pow(v/max, 0.5)) : 0;
+      // 把 hex 颜色转成 rgba, alpha 与强度联动
+      const hex = m.color.replace('#','');
+      const rr = parseInt(hex.substr(0,2),16);
+      const gg = parseInt(hex.substr(2,2),16);
+      const bb = parseInt(hex.substr(4,2),16);
+      const bg = v>0
+        ? `background:rgba(${rr},${gg},${bb},${alpha.toFixed(2)})`
+        : 'background:#f3f4f6';
       const title = v>0 ? `${m.label} · ${v.toLocaleString()} 个` : '空';
-      html += `<div class="heat-cell" style="${bg};color:${fg};text-align:center;padding:8px 4px;border-radius:5px;font-weight:600;font-size:12px;cursor:default"
+      html += `<div class="heat-cell" style="${bg};color:var(--txt);text-align:center;padding:8px 4px;border-radius:5px;font-weight:600;font-size:12px;cursor:default"
                    title="${esc(title)}">${v>0?v.toLocaleString():'·'}</div>`;
     });
   });

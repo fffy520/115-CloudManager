@@ -52,6 +52,23 @@
     </div>
   </div>
   <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap">
+    <div class="card" style="flex:1;min-width:340px">
+      <h3>📊 文件类型分布</h3>
+      <div class="sub" style="margin-bottom:8px">按扩展名分类：视频 / 音频 / 图片 / 字幕</div>
+      <div id="dashTypes"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:340px">
+      <h3>📁 各根目录容量</h3>
+      <div class="sub" style="margin-bottom:8px">一级目录（按子树文件大小排序）</div>
+      <div id="dashRootBuckets"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:340px">
+      <h3>🌡️ 文件大小 × 类型 热力图</h3>
+      <div class="sub" style="margin-bottom:8px">每格=该类型该大小档的文件数，颜色越深越多</div>
+      <div id="dashHeatmap"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:14px;align-items:stretch;flex-wrap:wrap">
     <div class="card" style="flex:1;min-width:260px">
       <h3>🔁 重复概况</h3>
       <div id="dashDup"></div>

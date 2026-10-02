@@ -607,6 +607,97 @@ def _build_dashboard() -> dict:
                 reclaim += m["sz"] or 0
                 extra += 1
 
+    # 📊 文件类型分布 / 📁 各根目录容量 / 🌡️ 文件大小热力图
+    con = _db()
+    try:
+        # ---------- 📁 各根目录容量（纯 SQL, 速度足够） ----------
+        root_buckets = [dict(r) for r in con.execute("""
+            SELECT t.root AS cid,
+                   coalesce(t.name, agg.root) AS name,
+                   agg.sz, agg.fc
+            FROM (SELECT root, sum(size) AS sz, count(*) AS fc
+                  FROM tree_nodes WHERE is_dir=0 GROUP BY root) agg
+            LEFT JOIN tree_nodes t ON t.cid = agg.root
+            ORDER BY agg.sz DESC""")]
+
+        # ---------- 📊 文件类型分布 + 🌡️ 文件大小热力图 ----------
+        # 单次扫描所有文件, 在 Python 内存中聚合(比多次 OR-LIKE 查询快得多)
+        VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.rmvb', '.ts', '.m2ts', '.wmv', '.flv',
+                     '.mov', '.mpg', '.mpeg', '.iso'}
+        AUDIO_EXT = {'.flac', '.mp3', '.wav', '.ape', '.dsf', '.dff', '.aac', '.ogg',
+                     '.wma', '.m4a'}
+        IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
+        SUBTITLE_EXT = {'.srt', '.ass', '.ssa', '.sub', '.idx', '.sup'}
+        # 列：<100MB / 100MB-1GB / 1-10GB / 10-100GB / >100GB
+        b1, b2, b3, b4 = (100 * 1024 * 1024, 1024 ** 3,
+                           10 * 1024 ** 3, 100 * 1024 ** 3)
+        size_labels = ["<100MB", "100MB-1GB", "1-10GB", "10-100GB", ">100GB"]
+        cat_def = [
+            ("video", "视频", VIDEO_EXT, False),
+            ("audio", "音频", AUDIO_EXT, False),
+            ("image", "图片", IMAGE_EXT, False),
+            ("subtitle", "字幕", SUBTITLE_EXT, False),
+            ("other", "其他", None, True),  # None + invert=True 表示"非已知扩展名"
+        ]
+        # 聚合容器
+        cat_stats = {ck: {"count": 0, "size": 0, "max_size": 0,
+                          "cells": [0, 0, 0, 0, 0]} for ck, *_ in cat_def}
+        # 用 SQLite 直接迭代全文件流(避免一次性 fetchall 占内存)
+        # 仅读取必要字段: name, size
+        cur = con.execute("SELECT name, size FROM tree_nodes WHERE is_dir=0")
+        for nm, sz in cur:
+            if not nm:
+                continue
+            dot = nm.rfind(".")
+            ext = nm[dot:].lower() if dot > 0 else ""
+            # 分类
+            if ext in VIDEO_EXT:
+                ck = "video"
+            elif ext in AUDIO_EXT:
+                ck = "audio"
+            elif ext in IMAGE_EXT:
+                ck = "image"
+            elif ext in SUBTITLE_EXT:
+                ck = "subtitle"
+            else:
+                ck = "other"
+            s = cat_stats[ck]
+            s["count"] += 1
+            s["size"] += sz or 0
+            if sz and sz > s["max_size"]:
+                s["max_size"] = sz
+            # 大小档位
+            if sz < b1:
+                s["cells"][0] += 1
+            elif sz < b2:
+                s["cells"][1] += 1
+            elif sz < b3:
+                s["cells"][2] += 1
+            elif sz < b4:
+                s["cells"][3] += 1
+            else:
+                s["cells"][4] += 1
+        # 输出
+        type_breakdown = []
+        heatmap_rows = []
+        max_cell = 0
+        for cat_key, cat_label, _exts, _inv in cat_def:
+            s = cat_stats[cat_key]
+            type_breakdown.append({"cat": cat_key, "label": cat_label,
+                                   "count": s["count"], "size": s["size"],
+                                   "max_size": s["max_size"]})
+            if s["cells"]:
+                max_cell = max(max_cell, max(s["cells"]))
+            heatmap_rows.append({"cat": cat_key, "label": cat_label,
+                                 "cells": s["cells"]})
+        size_heatmap = {
+            "cols": size_labels,
+            "rows": heatmap_rows,
+            "max": max_cell,
+        }
+    finally:
+        con.close()
+
     return {
         "stats": stats,
         "top_files": top_files,
@@ -619,6 +710,9 @@ def _build_dashboard() -> dict:
         "recent_scans": recent_scans,
         "transfer_db": transfer_db,
         "transfer_script": transfer_script,
+        "type_breakdown": type_breakdown,
+        "root_buckets": root_buckets,
+        "size_heatmap": size_heatmap,
         "dup": {"groups": len(dup_groups["groups"]), "exact_groups": exact_groups,
                 "reclaim": reclaim, "extra_copies": extra},
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

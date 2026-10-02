@@ -446,6 +446,9 @@ async function loadDash(){
   renderBuckets(d.buckets);
   renderDashRoots(d.top_roots);
   renderDashFiles(d.top_files);
+  renderDashTypes(d.type_breakdown || []);
+  renderDashRootBuckets(d.root_buckets || []);
+  renderDashHeatmap(d.size_heatmap);
   renderDashDup(d.dup);
   renderDashTransfer(d);
   renderDashJobs(d);
@@ -580,6 +583,106 @@ function renderDashFiles(files){
       <span class="sub" style="flex:none"><b>${fmt(f.size)}</b></span>
       <button data-action="open-in-tree" data-cid="${esc(f.pid)}" style="padding:2px 8px;font-size:11.5px">打开</button>
     </div>`).join('');
+}
+
+/* 📊 文件类型分布：进度条 + 数字 */
+const TYPE_META = {
+  video:    {icon:'🎬', color:'#0052d9', label:'视频'},
+  audio:    {icon:'🎵', color:'#2ba471', label:'音频'},
+  image:    {icon:'🖼️', color:'#e37318', label:'图片'},
+  subtitle: {icon:'💬', color:'#7a5af8', label:'字幕'},
+};
+function renderDashTypes(rows){
+  const el=$('#dashTypes');
+  if(!rows||!rows.length){ el.innerHTML='<div class="empty sub" style="padding:12px">暂无数据</div>'; return; }
+  // 找出最大 size 用作进度条基准
+  const maxSize = Math.max(1, ...rows.map(r=>r.size||0));
+  const totalFiles = rows.reduce((s,r)=>s+(r.count||0), 0);
+  const totalSize  = rows.reduce((s,r)=>s+(r.size||0), 0);
+  el.innerHTML = rows.map(r=>{
+    const m = TYPE_META[r.cat] || {icon:'📄', color:'#8a919c', label: r.label || r.cat};
+    const pct = ((r.size||0)/maxSize*100).toFixed(1);
+    const sharePct = totalSize>0 ? ((r.size||0)/totalSize*100).toFixed(1) : '0.0';
+    return `<div style="margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:13px">
+        <span style="font-size:15px">${m.icon}</span>
+        <span style="flex:1;font-weight:600">${esc(m.label)}</span>
+        <span class="sub" style="flex:none;font-size:12px">${(r.count||0).toLocaleString()} 个 · 占 ${sharePct}%</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="flex:1;background:#eef0f3;border-radius:5px;height:14px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:${m.color};border-radius:5px;transition:width .6s"></div>
+        </div>
+        <span style="width:90px;flex:none;text-align:right;font-size:12.5px"><b>${fmt(r.size||0)}</b></span>
+      </div>
+      ${r.max_size>0?`<div class="sub" style="font-size:11.5px;margin-top:3px">最大单文件 ${fmt(r.max_size)}</div>`:''}
+    </div>`;
+  }).join('')
+  + `<div class="sub" style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);font-size:12.5px">
+      合计 ${totalFiles.toLocaleString()} 个文件 · 总大小 <b>${fmt(totalSize)}</b>
+    </div>`;
+}
+
+/* 📁 各根目录容量：横向堆叠条 + 列表 */
+function renderDashRootBuckets(rows){
+  const el=$('#dashRootBuckets');
+  if(!rows||!rows.length){ el.innerHTML='<div class="empty sub" style="padding:12px">暂无数据</div>'; return; }
+  const maxSize = Math.max(1, ...rows.map(r=>r.sz||0));
+  // 只展示前 12 个一级目录，剩下的折叠到"+N 更多"
+  const HEAD = 12;
+  const head = rows.slice(0, HEAD);
+  const more = rows.length - HEAD;
+  el.innerHTML = head.map((r,i)=>{
+    const pct = ((r.sz||0)/maxSize*100).toFixed(1);
+    return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13px;cursor:pointer"
+                title="点击在目录浏览中打开" data-action="open-in-tree" data-cid="${esc(r.cid)}">
+      <span class="sub" style="width:22px;flex:none">${i+1}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent)">${esc(r.name||r.cid)}</span>
+      <div style="width:120px;flex:none;background:#eef0f3;border-radius:4px;height:10px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:var(--accent);border-radius:4px"></div>
+      </div>
+      <span style="width:80px;flex:none;text-align:right;font-size:12.5px"><b>${fmt(r.sz||0)}</b></span>
+      <span class="sub" style="width:60px;flex:none;text-align:right;font-size:12px">${(r.fc||0).toLocaleString()}</span>
+    </div>`;
+  }).join('')
+  + (more>0?`<div class="sub" style="text-align:center;padding:6px 0;font-size:12px">还有 ${more} 个一级目录未显示</div>`:'');
+}
+
+/* 🌡️ 文件大小 × 类型 热力图 */
+function renderDashHeatmap(h){
+  const el=$('#dashHeatmap');
+  if(!h || !h.rows || !h.rows.length){ el.innerHTML='<div class="empty sub" style="padding:12px">暂无数据</div>'; return; }
+  const cols = h.cols || [];
+  const max = Math.max(1, h.max || 0);
+  // 表头
+  let html = `<div style="display:grid;grid-template-columns:62px repeat(${cols.length},1fr);gap:4px;font-size:12px;align-items:center">`;
+  html += '<div></div>';  // 左上角空
+  cols.forEach(c=>{ html += `<div class="sub" style="text-align:center;font-size:11px;padding:2px 0">${esc(c)}</div>`; });
+  // 行
+  h.rows.forEach(row=>{
+    const m = TYPE_META[row.cat] || {icon:'📄', color:'#8a919c', label:row.label};
+    html += `<div style="display:flex;align-items:center;gap:4px;font-size:12.5px;padding:4px 0">
+              <span style="font-size:14px">${m.icon}</span><span>${esc(m.label)}</span>
+            </div>`;
+    (row.cells||[]).forEach(v=>{
+      const intensity = v>0 ? Math.max(0.08, Math.pow(v/max, 0.5)) : 0;
+      const bg = v>0 ? `background:${m.color};opacity:${intensity.toFixed(2)}` : 'background:#f3f4f6';
+      const fg = (v>0 && intensity>0.55) ? '#fff' : 'var(--txt)';
+      const title = v>0 ? `${m.label} · ${v.toLocaleString()} 个` : '空';
+      html += `<div class="heat-cell" style="${bg};color:${fg};text-align:center;padding:8px 4px;border-radius:5px;font-weight:600;font-size:12px;cursor:default"
+                   title="${esc(title)}">${v>0?v.toLocaleString():'·'}</div>`;
+    });
+  });
+  html += '</div>';
+  // 图例
+  html += `<div class="sub" style="margin-top:10px;display:flex;align-items:center;gap:6px;font-size:11.5px">
+            <span>少</span>
+            <div style="flex:1;max-width:160px;height:8px;border-radius:4px;background:linear-gradient(to right,#f3f4f6,#0052d9)"></div>
+            <span>多</span>
+            <span style="flex:1"></span>
+            <span>峰值：<b>${max.toLocaleString()}</b> 个</span>
+          </div>`;
+  el.innerHTML = html;
 }
 function renderDashDup(dup){
   $('#dashDup').innerHTML=`

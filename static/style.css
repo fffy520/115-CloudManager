@@ -48,6 +48,8 @@ th{color:var(--sub);font-weight:500;background:#fafbfc}
 .b-warn{background:#fdf1e7;color:var(--warn)}.b-stop{background:#f0f1f3;color:var(--sub)}
 .b-pri{background:var(--accent-bg);color:var(--accent)}.b-pri:hover{background:var(--accent);color:#fff}
 .progress{height:8px;background:#eef0f3;border-radius:5px;overflow:hidden;flex:1;min-width:120px}
+.heat-cell{transition:transform .15s}
+.heat-cell:hover{transform:scale(1.05);box-shadow:0 1px 4px rgba(0,0,0,.15)}
 .progress>div{height:100%;background:var(--accent);border-radius:5px;transition:width .4s}
 .mono{font-family:Consolas,monospace;font-size:12.5px}
 .sub{color:var(--sub);font-size:12.5px}
